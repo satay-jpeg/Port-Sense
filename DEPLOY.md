@@ -8,6 +8,18 @@ configures itself. Your part is four steps, about 10 minutes.
 
 ---
 
+## Provider split (deliberate)
+
+| Where | Provider | Why |
+|---|---|---|
+| **Deployed** (public Render URL) | Gemini free tier | `/api/chat` is unauthenticated. On a free key the worst a stranger can do is exhaust a quota; on a paid key they'd spend your money. |
+| **Local** (your machine) | Anthropic (optional) | Higher-quality answers while rehearsing, with no public exposure. |
+
+Data-privacy note worth having ready for judges: Google's **free** tier reserves
+the right to use submitted data to improve their products, so it suits simulated
+terminal data but not real telemetry. Anthropic's API does not train on inputs
+by default. Production would move to a paid tier or a self-hosted model.
+
 ## Step 1 — Get a free Gemini API key (2 min)
 
 This is the one credential the deployment needs. It lives **only** in Render's
