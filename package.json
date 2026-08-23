@@ -1,0 +1,21 @@
+{
+  "name": "portsense",
+  "version": "1.0.0",
+  "description": "PortSense — agentic port operations assistant for PSA Code Sprint (arrival prediction, yard reshuffling, predictive maintenance)",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "models": "node scripts/list-models.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "openai": "^4.77.0"
+  }
+}

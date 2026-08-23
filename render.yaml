@@ -1,0 +1,19 @@
+# Render Blueprint — deploys PortSense on the free tier.
+# In Render: New → Blueprint → connect this repo. Everything below is applied
+# automatically; the only manual step is pasting GEMINI_API_KEY.
+services:
+  - type: web
+    name: portsense
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # prompted for in the Render dashboard, never in git
+      - key: AGENT_PROVIDER
+        value: gemini
+      - key: NODE_VERSION
+        value: "20"

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PortSense — PSA Terminal Operations</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚓</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⚓</span>
+      <div>
+        <h1>PortSense</h1>
+        <p>PSA Terminal Operations Assistant</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="pill" id="interval-pill" title="Sensor sampling cadence">sensors: every –s</span>
+      <span class="pill mode-pill" id="mode-pill">agent: detecting…</span>
+      <span class="clock" id="clock"></span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-view="arrivals" role="tab">🚢 Vessel Arrivals</button>
+    <button class="tab" data-view="yard" role="tab">📦 Yard Reshuffling</button>
+    <button class="tab" data-view="equipment" role="tab">🛠 Equipment Health</button>
+    <button class="tab" data-view="alerts" role="tab">🔔 Alerts <span class="badge" id="alert-badge" hidden>0</span></button>
+  </nav>
+
+  <div class="layout">
+    <main class="content">
+      <!-- Vessel arrivals -->
+      <section class="view active" id="view-arrivals" role="tabpanel">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Arrival predictions</h2>
+            <p class="panel-sub">Scheduled vs AI-predicted ETA, with contributing delay factors</p>
+          </div>
+          <div class="table-wrap">
+            <table id="vessel-table">
+              <thead>
+                <tr><th>Vessel</th><th>Service</th><th>Berth</th><th>Scheduled ETA</th><th>Predicted ETA</th><th>Variance</th><th>Confidence</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel" id="delay-factors-panel">
+          <div class="panel-head"><h2>Why are vessels late?</h2><p class="panel-sub">Delay drivers for at-risk arrivals</p></div>
+          <div id="delay-factors" class="factor-list"></div>
+        </div>
+      </section>
+
+      <!-- Yard -->
+      <section class="view" id="view-yard" role="tabpanel">
+        <div class="panel">
+          <div class="panel-head"><h2>Block utilisation</h2><p class="panel-sub">Containers stored per yard block</p></div>
+          <div id="yard-blocks" class="block-grid"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Pre-emptive reshuffle recommendations</h2>
+            <p class="panel-sub">Buried containers due for retrieval soon — shuffle these during crane idle time to avoid last-minute digging</p>
+          </div>
+          <div id="reshuffle-list" class="rec-list"></div>
+        </div>
+        <div class="panel" id="dig-panel" hidden>
+          <div class="panel-head"><h2 id="dig-title">Dig-out plan</h2><p class="panel-sub" id="dig-sub"></p></div>
+          <div id="dig-visual" class="dig-visual"></div>
+          <ol id="dig-steps" class="dig-steps"></ol>
+        </div>
+      </section>
+
+      <!-- Equipment -->
+      <section class="view" id="view-equipment" role="tabpanel">
+        <div class="panel slim">
+          <div class="interval-row">
+            <label for="interval-input">Sensor sampling interval</label>
+            <input id="interval-input" type="number" min="1" max="300" step="1" />
+            <span class="unit">seconds</span>
+            <button id="interval-apply" class="btn">Apply</button>
+            <span class="hint">Applies to all equipment. You can also ask the agent: “sample sensors every 10 seconds”.</span>
+          </div>
+        </div>
+        <div id="equipment-grid" class="equipment-grid"></div>
+      </section>
+
+      <!-- Alerts -->
+      <section class="view" id="view-alerts" role="tabpanel">
+        <div class="panel">
+          <div class="panel-head"><h2>Anomaly alerts</h2><p class="panel-sub">Raised automatically when a sensor breaches its threshold; the assigned operator is paged immediately</p></div>
+          <div id="alert-list" class="alert-list"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Operator notifications</h2><p class="panel-sub">Simulated pager / SMS dispatch log</p></div>
+          <ul id="notif-list" class="notif-list"></ul>
+        </div>
+      </section>
+    </main>
+
+    <!-- Agent chat -->
+    <aside class="chat">
+      <div class="chat-head">
+        <h2>Ask PortSense</h2>
+        <p>Questions route to the right solution automatically</p>
+      </div>
+      <div class="chat-log" id="chat-log">
+        <div class="msg agent">
+          <p>Hi! I’m PortSense. Ask me about any of the three solution areas:</p>
+          <div class="suggestions">
+            <button class="chip" data-q="Which vessels are predicted to arrive late?">Which vessels are late?</button>
+            <button class="chip" data-q="What should we reshuffle in the yard before tonight?">What should we reshuffle?</button>
+            <button class="chip" data-q="Is any equipment showing anomalies right now?">Any equipment anomalies?</button>
+            <button class="chip" data-q="Sample the sensors every 10 seconds">Sample sensors every 10s</button>
+          </div>
+        </div>
+      </div>
+      <form class="chat-input" id="chat-form">
+        <input id="chat-text" type="text" placeholder="e.g. Why is Kota Harmoni delayed?" autocomplete="off" />
+        <button type="submit" class="btn primary" id="chat-send">Send</button>
+      </form>
+    </aside>
+  </div>
+
+  <div id="toast-stack" class="toast-stack"></div>
+  <div id="tooltip" class="tooltip" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
