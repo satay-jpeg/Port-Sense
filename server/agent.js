@@ -36,7 +36,10 @@ const PROVIDERS = {
     label: "Groq",
     keyEnv: "GROQ_API_KEY",
     baseURL: "https://api.groq.com/openai/v1",
-    defaultModel: "llama-3.3-70b-versatile",
+    // llama-3.3-70b-versatile was retired; gpt-oss-120b is the strongest
+    // tool-calling model on Groq's free tier. If this one is retired too,
+    // discovery walks the ranked queue automatically.
+    defaultModel: "openai/gpt-oss-120b",
     modelEnv: "GROQ_MODEL",
   },
   cerebras: {
@@ -65,7 +68,34 @@ function resolveProvider() {
   }
   if (explicit && PROVIDERS[explicit]) {
     const p = PROVIDERS[explicit];
+    // Requesting a provider whose key is missing is a config mistake. Say so
+    // clearly here — otherwise the SDK later reports a confusing
+    // "OPENAI_API_KEY is missing" that names the wrong variable entirely.
+    if (!process.env[p.keyEnv]) {
+      return {
+        kind: "rules",
+        label: "rule-based",
+        misconfigured: `AGENT_PROVIDER=${explicit} but ${p.keyEnv} is not set in the environment`,
+        fix: `Either set ${p.keyEnv}, or change AGENT_PROVIDER to a provider whose key you have.`,
+      };
+    }
     return { kind: "openai", key: explicit, label: p.label, cfg: p, model: process.env[p.modelEnv] || p.defaultModel };
+  }
+  if ((explicit === "claude" || explicit === "anthropic") && !process.env.ANTHROPIC_API_KEY) {
+    return {
+      kind: "rules",
+      label: "rule-based",
+      misconfigured: "AGENT_PROVIDER=claude but ANTHROPIC_API_KEY is not set",
+      fix: "Set ANTHROPIC_API_KEY, or remove AGENT_PROVIDER to fall back to whichever key you do have.",
+    };
+  }
+  if (explicit && !PROVIDERS[explicit]) {
+    return {
+      kind: "rules",
+      label: "rule-based",
+      misconfigured: `AGENT_PROVIDER="${explicit}" is not a known provider`,
+      fix: `Use one of: ${Object.keys(PROVIDERS).join(", ")}, claude, rules.`,
+    };
   }
   // Auto-detect from whichever key is present.
   for (const [key, p] of Object.entries(PROVIDERS)) {
@@ -78,6 +108,15 @@ function resolveProvider() {
 }
 
 const provider = resolveProvider();
+
+// Surface a config mistake loudly at startup rather than on the first question.
+if (provider.misconfigured) {
+  console.error(
+    `\n[portsense] ⚠️  Agent misconfigured: ${provider.misconfigured}\n` +
+    `[portsense]     ${provider.fix}\n` +
+    `[portsense]     Running the rule-based router meanwhile — the app still works.\n`
+  );
+}
 
 const SYSTEM_PROMPT = `You are PortSense, the operations assistant for a PSA container terminal in Singapore.
 You have live tools covering three solution areas:
@@ -162,6 +201,8 @@ export function getMode() {
 // Human-readable provider label for the dashboard pill.
 export function getProviderLabel() {
   if (aiAvailable === false) {
+    // A config mistake reads very differently from "no key configured".
+    if (provider.misconfigured) return `rule-based (config: ${provider.misconfigured})`;
     if (provider.kind === "rules") return "rule-based (no API key)";
     // A key IS configured but the provider rejected us — say what went wrong
     // rather than blaming a missing key.
@@ -173,7 +214,17 @@ export function getProviderLabel() {
 // Model IDs churn on free tiers. When the configured model 404s, ask the
 // provider what it actually offers and pick the best available match, so a
 // renamed or retired model self-heals instead of dropping to the rule router.
-let modelDiscoveryTried = false;
+let modelCandidates = null; // ranked queue, built lazily from /models
+
+// Models that cannot serve this app at all: speech, embedding, safety, image
+// and other single-purpose endpoints. PortSense is useless without tool
+// calling, so anything in this list is excluded outright.
+const NOT_CHAT = /whisper|tts|embed|guard|moderation|imagen|veo|rerank|ocr|allam|vision|distil-whisper/i;
+
+// Families known to support tool/function calling across the providers we
+// target. Scored up because a model without tool support fails on the first
+// question, regardless of how capable it otherwise is.
+const TOOL_CAPABLE = /llama-?3\.[13]|llama-?4|qwen|gpt-oss|mixtral|kimi|deepseek|flash|sonnet|opus|haiku/i;
 
 // Ranking is tuned for FREE-TIER RELIABILITY, not raw capability. On Gemini's
 // free tier the quota differences are large and they decide whether a live demo
@@ -183,34 +234,75 @@ let modelDiscoveryTried = false;
 // spends the demo rate-limited. Override with GEMINI_MODEL to force a choice.
 export function modelScore(id) {
   let s = 0;
-  if (/flash/i.test(id)) s += 100;      // flash tiers carry the free quota
-  if (/lite/i.test(id)) s += 12;        // lite has the most generous limits
-  if (/pro/i.test(id)) s -= 60;         // pro is paid-only or heavily capped
-  if (/exp|preview|thinking/i.test(id)) s -= 40; // preview builds = tightest quota
-  // Prefer mature versions: newest previews are the most restricted.
-  const ver = parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
-  s += ver <= 2.9 ? ver * 2 : -ver;
+  if (NOT_CHAT.test(id)) return -1000;          // cannot serve this app at all
+  if (TOOL_CAPABLE.test(id)) s += 200;          // tool calling is non-negotiable
+  if (/flash/i.test(id)) s += 100;              // Gemini's free-quota tier
+  if (/lite|instant/i.test(id)) s += 12;        // most generous rate limits
+  if (/pro/i.test(id)) s -= 60;                 // paid-only or heavily capped
+  if (/exp|preview|thinking/i.test(id)) s -= 40;// preview builds = tightest quota
+  // Very small models are cheap but unreliable at multi-step tool use — they
+  // tend to emit wrong JSON types, which strict providers reject outright.
+  const params = /(\d+)\s*b\b/i.exec(id);
+  if (params) {
+    const b = Number(params[1]);
+    if (b < 8) s -= 40;
+    else if (b >= 70) s += 15;   // larger models follow tool schemas reliably
+  }
+  // Version preference applies to DECIMAL versions only (2.5, 3.7). Matching
+  // any number here would read the "120" of "gpt-oss-120b" as version 120 and
+  // bury a strong model — that bug picked a weak model over gpt-oss.
+  const verMatch = id.match(/(?:^|[^\d.])(\d\.\d)(?![\db])/);
+  if (verMatch) {
+    const ver = parseFloat(verMatch[1]);
+    s += ver <= 2.9 ? ver * 2 : -ver;  // newest previews carry the tightest quota
+  }
   return s;
 }
 
+// Advance to the next viable model. Catalogues churn and a single guess is
+// fragile — a retired ID 404s, and a surviving-but-wrong ID (a speech or
+// safety model) 400s with "tool calling is not supported". So we build a
+// ranked queue once and walk it until one actually works.
 async function rediscoverModel() {
-  if (modelDiscoveryTried || provider.kind !== "openai") return false;
-  modelDiscoveryTried = true;
-  try {
-    const res = await getClient().models.list();
-    // Gemini returns ids as "models/gemini-x"; other providers return bare ids.
-    const ids = res.data.map((m) => String(m.id).replace(/^models\//, ""));
-    // Keep only chat-capable models; drop embedding/image/audio endpoints.
-    const usable = ids.filter((id) => !/embed|aqa|imagen|veo|tts|image|vision/i.test(id));
-    const pick = usable.sort((a, b) => modelScore(b) - modelScore(a))[0];
-    if (!pick || pick === provider.model) return false;
-    console.warn(`[portsense] Model "${provider.model}" unavailable — switching to "${pick}".`);
-    provider.model = pick;
-    return true;
-  } catch (err) {
-    console.warn(`[portsense] Could not list models: ${err.message}`);
+  if (provider.kind !== "openai") return false;
+
+  if (!modelCandidates) {
+    try {
+      const res = await getClient().models.list();
+      // Gemini returns ids as "models/gemini-x"; others return bare ids.
+      const ids = res.data.map((m) => String(m.id).replace(/^models\//, ""));
+      modelCandidates = ids
+        .filter((id) => modelScore(id) > -1000)
+        .sort((a, b) => modelScore(b) - modelScore(a));
+      console.warn(`[portsense] Discovered ${modelCandidates.length} usable models; ranked: ${modelCandidates.slice(0, 3).join(", ")}…`);
+    } catch (err) {
+      console.warn(`[portsense] Could not list models: ${err.message}`);
+      modelCandidates = [];
+      return false;
+    }
+  }
+
+  const idx = modelCandidates.indexOf(provider.model);
+  const next = modelCandidates[idx + 1];
+  if (!next) {
+    console.warn("[portsense] No further model candidates to try.");
     return false;
   }
+  console.warn(`[portsense] Model "${provider.model}" unusable — trying "${next}".`);
+  provider.model = next;
+  return true;
+}
+
+// Errors that mean "this model won't work" rather than "the request was bad".
+function isModelProblem(err) {
+  const status = err?.status ?? err?.statusCode;
+  const msg = String(err?.message || "");
+  if (status === 404) return true;
+  // "tool call validation failed" means the model emitted arguments of the
+  // wrong JSON type (e.g. "true" instead of true) and the provider rejected
+  // them. That is a model-capability failure, not a bad request on our side —
+  // a stronger model fixes it, so treat it as a reason to try the next one.
+  return /model.*(not found|does not exist|decommissioned|deprecated)|tool call\w*.*(not supported|validation failed)|does not support tools|not supported with this model|did not match schema/i.test(msg);
 }
 
 // Per-browser conversations. A single deployed instance is used by several
@@ -590,19 +682,19 @@ export async function ask(question, sessionId = "default") {
       aiAvailable = true;
       return finish(answer);
     } catch (err) {
-      // A 404 (or an explicit "model not found") means the model ID is stale,
-      // not that the key is bad. Ask the provider what it offers and retry once.
-      const modelMissing =
-        err?.status === 404 || /model.*(not found|does not exist)|not found.*model/i.test(String(err?.message || ""));
-      if (modelMissing && (await rediscoverModel())) {
-        addStep(episode, STEP.FALLBACK, `Model unavailable — rediscovered and switched to "${provider.model}", retrying`);
+      // A stale or tool-incapable model is a catalogue problem, not a bad key.
+      // Walk the ranked candidate queue until one works (bounded, so a provider
+      // with no usable models can't spin here).
+      for (let attempt = 0; attempt < 4 && isModelProblem(err); attempt++) {
+        if (!(await rediscoverModel())) break;
+        addStep(episode, STEP.FALLBACK, `Model unusable — switched to "${provider.model}" and retrying`);
         try {
           session.history = snapshot;
           const answer = await askOpenAICompatible(question, session, episode);
           aiAvailable = true;
           return finish(answer);
         } catch (retryErr) {
-          err = retryErr; // fall through to the normal handling below
+          err = retryErr; // try the next candidate, or fall through below
         }
       }
 
