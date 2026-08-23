@@ -46,18 +46,32 @@ check, because a leaked key gets scraped and auto-revoked within minutes).
 ## Step 3 — Deploy on Render (3 min)
 
 1. Sign up at **https://render.com** (free, GitHub login is easiest)
-2. Click **New +** → **Blueprint**
+2. Click **New +** → on the "Create a new Service" page choose **Web Services**
+   → **New Web Service**
 3. Connect your GitHub account and pick the `portsense` repo
-4. Render reads `render.yaml` and pre-fills everything. It will prompt for the
-   one secret value:
-   - **GEMINI_API_KEY** → paste the key from Step 1
-5. Click **Apply** / **Create**
+4. Fill in the settings:
+
+   | Field | Value |
+   |---|---|
+   | Language / Runtime | `Node` |
+   | Build Command | `npm install` |
+   | Start Command | `npm start` |
+   | **Instance Type** | **Free** — Render often preselects a paid plan, so check this |
+   | Health Check Path (under Advanced) | `/healthz` |
+
+5. Expand **Environment Variables** and add:
+   - `GEMINI_API_KEY` → the key from Step 1
+   - `AGENT_PROVIDER` → `gemini`
+6. Click **Create Web Service**
 
 First build takes ~2–3 minutes. When it finishes you get a URL like
 `https://portsense.onrender.com`.
 
-> If the `singapore` region isn't offered on the free plan, edit `region:` in
-> `render.yaml` to `oregon` and push again.
+> **Blueprint alternative.** `render.yaml` in this repo does all of the above
+> automatically, but Blueprints are a separate flow from the "Create a new
+> Service" page — find them at **https://dashboard.render.com/blueprints** →
+> **New Blueprint Instance**. Either route produces the same result; the manual
+> Web Service form above is fine and only takes a minute longer.
 
 ---
 
