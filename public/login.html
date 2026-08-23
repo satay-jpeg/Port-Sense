@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign in · PortSense</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ededed' stroke-width='2'><path d='M3 18l2-8h14l2 8'/><path d='M12 10V4'/><circle cx='12' cy='3' r='1'/></svg>" />
+</head>
+<body>
+  <main class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 17l1.8-6.5A1 1 0 0 1 5.8 10h12.4a1 1 0 0 1 1 .5L21 17"/>
+            <path d="M2 20c1.5 0 1.5-1.2 3-1.2S6.5 20 8 20s1.5-1.2 3-1.2S12.5 20 14 20s1.5-1.2 3-1.2S18.5 20 20 20"/>
+            <path d="M12 10V5"/>
+          </svg>
+        </div>
+        <div>
+          <h1>PortSense</h1>
+          <p>PSA Terminal Operations</p>
+        </div>
+      </div>
+
+      <section class="auth-panel">
+        <h2>Sign in</h2>
+        <p class="sub">Access the terminal operations console.</p>
+
+        <div class="auth-error" id="error" hidden>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+          </svg>
+          <span id="error-text"></span>
+        </div>
+
+        <form id="login-form" novalidate>
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" autocomplete="username" required autofocus />
+          </div>
+          <div class="field">
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required />
+          </div>
+          <button type="submit" class="btn primary block" id="submit">Sign in</button>
+        </form>
+
+        <div class="auth-hint">
+          <strong style="color: var(--text-2); font-weight: 500;">Demo access</strong><br />
+          Pre-filled below — sign in as <code id="demo-user">operator</code> with password
+          <code id="demo-pass">portsense</code>. A <code>supervisor</code> account exists with the same password.
+        </div>
+      </section>
+
+      <p class="auth-foot">Simulated terminal data · PSA Code Sprint</p>
+    </div>
+  </main>
+
+  <script>
+    const form = document.getElementById("login-form");
+    const errorBox = document.getElementById("error");
+    const errorText = document.getElementById("error-text");
+    const submit = document.getElementById("submit");
+
+    // Pre-fill the demo account so judges are one click from the dashboard.
+    fetch("/api/demo-credentials")
+      .then((r) => r.json())
+      .then((d) => {
+        document.getElementById("username").value = d.username;
+        document.getElementById("password").value = d.password;
+        document.getElementById("demo-user").textContent = d.username;
+        document.getElementById("demo-pass").textContent = d.password;
+      })
+      .catch(() => {});
+
+    function showError(msg) {
+      errorText.textContent = msg;
+      errorBox.hidden = false;
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorBox.hidden = true;
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      if (!username || !password) return showError("Enter both a username and a password.");
+
+      submit.disabled = true;
+      submit.textContent = "Signing in…";
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Sign in failed");
+        window.location.href = "/";
+      } catch (err) {
+        showError(err.message);
+        submit.disabled = false;
+        submit.textContent = "Sign in";
+      }
+    });
+  </script>
+</body>
+</html>

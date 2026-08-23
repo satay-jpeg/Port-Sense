@@ -10,7 +10,20 @@
 
 The **agentic workflow**: operators ask questions in plain language ("Why is Kota Harmoni late?", "What should we reshuffle before tonight?", "Sample sensors every 10 seconds"). The agent picks the right tool(s), answers from live terminal state, and the dashboard **automatically switches to the relevant solution panel**.
 
-The agent runs on **Google Gemini's free tier** by default — no credit card, no billing risk during judging.
+The agent runs on a **free-tier model provider** by default (Gemini or Groq) — no credit card, no billing risk during judging.
+
+## Signing in
+
+The console sits behind a login. Demo accounts (pre-filled on the sign-in page):
+
+| Username | Password | Role |
+|---|---|---|
+| `operator` | `portsense` | Duty Operator |
+| `supervisor` | `portsense` | Terminal Supervisor |
+
+Passwords are salted and hashed with scrypt, sessions are signed HMAC cookies with
+a 12-hour expiry, and every `/api` route is gated. It's a demo gate, not an
+identity system — there's no user store or password reset.
 
 ## How it meets the agentic requirements
 

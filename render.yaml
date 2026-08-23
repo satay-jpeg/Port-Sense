@@ -17,3 +17,7 @@ services:
         value: gemini
       - key: NODE_VERSION
         value: "20"
+      - key: NODE_ENV
+        value: production      # marks the session cookie Secure behind Render's TLS
+      - key: SESSION_SECRET
+        generateValue: true    # stable secret so logins survive a restart

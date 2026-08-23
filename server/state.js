@@ -22,20 +22,32 @@ const DELAY_FACTORS = [
   "Bunkering overrun at previous call",
 ];
 
+// Carrier lines, as in the arrivals design. Each gets a colour used for the
+// radar plot, schedule rows and the fleet-mix breakdown.
+export const CARRIERS = {
+  MAERSK:    { label: "Maersk",      color: "#0078d2" },
+  MSC:       { label: "MSC",         color: "#f5a623" },
+  CMACGM:    { label: "CMA CGM",     color: "#00c864" },
+  COSCO:     { label: "COSCO",       color: "#e5484d" },
+  EVERGREEN: { label: "Evergreen",   color: "#00c8b4" },
+  ONE:       { label: "ONE",         color: "#ff3c78" },
+};
+
 function makeVessels() {
+  //     name              carrier      svc     eta   delay  berth  status        flag  teu    loa   x    y
   const specs = [
-    ["MV Ever Meadow",   "AEX1", -6,  0.4, "B1", "berthed"],
-    ["MV Lotus Trader",  "CIX2",  2,  1.2, "B2", "approaching"],
-    ["MV Kota Harmoni",  "SSE3",  5,  4.6, "B3", "en-route"],
-    ["MV Pacific Crown", "AEX1",  9,  0.0, "B4", "en-route"],
-    ["MV Maju Sentosa",  "IAS4", 14,  7.8, "B1", "en-route"],
-    ["MV Blue Horizon",  "CIX2", 20,  2.1, "B2", "en-route"],
-    ["MV Star Aquila",   "SSE3", 27, -1.5, "B3", "en-route"],
-    ["MV Hai Feng 88",   "IAS4", 33,  5.9, "B4", "en-route"],
-    ["MV Ocean Cantata", "AEX1", 41,  0.7, "B1", "en-route"],
-    ["MV Temasek Glory", "CIX2", 47, 11.4, "B2", "en-route"],
+    ["MV Ever Meadow",   "EVERGREEN", "AEX1",  -6,  0.4, "B1", "BERTHED",     "PA", 14424, 366, 46, 62],
+    ["MV Lotus Trader",  "MAERSK",    "CIX2",   2,  1.2, "B2", "APPROACHING", "DK", 11000, 335, 62, 44],
+    ["MV Kota Harmoni",  "ONE",       "SSE3",   5,  4.6, "B3", "ANCHORED",    "SG",  8200, 294, 74, 30],
+    ["MV Pacific Crown", "MSC",       "AEX1",   9,  0.0, "B4", "APPROACHING", "LR", 19200, 399, 30, 24],
+    ["MV Maju Sentosa",  "COSCO",     "IAS4",  14,  7.8, "B1", "ANCHORED",    "MY",  6400, 260, 18, 52],
+    ["MV Blue Horizon",  "CMACGM",    "CIX2",  20,  2.1, "B2", "EN_ROUTE",    "FR", 15500, 372, 86, 66],
+    ["MV Star Aquila",   "EVERGREEN", "SSE3",  27, -1.5, "B3", "EN_ROUTE",    "PA", 12100, 340, 12, 18],
+    ["MV Hai Feng 88",   "COSCO",     "IAS4",  33,  5.9, "B4", "EN_ROUTE",    "CN",  5200, 228, 90, 20],
+    ["MV Ocean Cantata", "MSC",       "AEX1",  41,  0.7, "B1", "EN_ROUTE",    "LR", 16800, 383, 24, 80],
+    ["MV Temasek Glory", "MAERSK",    "CIX2",  47, 11.4, "B2", "EN_ROUTE",    "SG", 20500, 400, 68, 86],
   ];
-  return specs.map(([name, service, etaOffsetH, delayH, berth, status], i) => {
+  return specs.map(([name, carrier, service, etaOffsetH, delayH, berth, status, flag, teu, loa, x, y], i) => {
     const scheduled = now() + etaOffsetH * HOUR;
     const predicted = scheduled + delayH * HOUR;
     const factors = [];
@@ -48,9 +60,17 @@ function makeVessels() {
     return {
       id: `V${String(i + 1).padStart(3, "0")}`,
       name,
+      carrier,
+      carrierLabel: CARRIERS[carrier].label,
+      carrierColor: CARRIERS[carrier].color,
       service,
       berth,
       status,
+      flag,
+      teu,
+      loa,                       // length overall, metres
+      mmsi: String(563000000 + i * 13417),
+      x, y,                      // position on the approach radar, 0-100%
       scheduledEta: iso(scheduled),
       predictedEta: iso(predicted),
       delayHours: delayH,
@@ -65,6 +85,49 @@ function makeVessels() {
 export const vessels = makeVessels();
 
 // ---------------------------------------------------------------------------
+// Berths — the quay side of the arrivals picture
+// ---------------------------------------------------------------------------
+
+function makeBerths() {
+  const defs = [
+    ["B1", "NORTH", 400], ["B2", "NORTH", 400],
+    ["B3", "SOUTH", 350], ["B4", "SOUTH", 420],
+    ["B5", "EAST", 300],  ["B6", "EAST", 300],
+  ];
+  return defs.map(([id, terminal, maxLength]) => {
+    const occupant = vessels.find((v) => v.berth === id && v.status === "BERTHED");
+    const reserved = vessels.find((v) => v.berth === id && v.status === "APPROACHING");
+    return {
+      id,
+      terminal,
+      maxLength,
+      status: occupant ? "OCCUPIED" : reserved ? "RESERVED" : "FREE",
+      occupiedBy: occupant ? occupant.name : null,
+      reservedFor: reserved ? reserved.name : null,
+      // Share of the next 24h this berth is committed for.
+      utilisationPct: occupant ? 82 : reserved ? 55 : 18,
+    };
+  });
+}
+
+export const berths = makeBerths();
+
+// Fleet mix by carrier, for the arrivals breakdown panel.
+export function carrierMix() {
+  const counts = {};
+  for (const v of vessels) counts[v.carrier] = (counts[v.carrier] || 0) + 1;
+  return Object.entries(counts)
+    .map(([key, count]) => ({
+      carrier: key,
+      label: CARRIERS[key].label,
+      color: CARRIERS[key].color,
+      count,
+      teu: vessels.filter((v) => v.carrier === key).reduce((s, v) => s + v.teu, 0),
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+// ---------------------------------------------------------------------------
 // 2. Container yard — blocks, stacks, and reshuffle planning
 // ---------------------------------------------------------------------------
 // Each block is a set of bays; each bay is a stack (array, index 0 = ground
@@ -72,7 +135,17 @@ export const vessels = makeVessels();
 // container above it.
 
 export const yard = { blocks: {} };
-export const containers = {}; // id -> { block, bay, tier, vessel, retrievalEta }
+export const containers = {}; // id -> { block, bay, tier, type, flow, vessel, … }
+
+const DESTINATIONS = ["Rotterdam", "Shanghai", "Los Angeles", "Busan", "Hamburg", "Dubai", "Jebel Ali"];
+
+// Handling cost assumptions used to price a reshuffle plan. Stated here so the
+// savings figures on the yard screen are traceable rather than magic numbers.
+export const MOVE_COST = {
+  minutesPerRehandle: 4,
+  litresPerRehandle: 2.6,   // RTG diesel burn per container move
+  usdPerRehandle: 38,       // crane time + fuel + labour
+};
 
 function makeYard() {
   const blockNames = ["A", "B", "C", "D"];
@@ -88,12 +161,20 @@ function makeYard() {
         // Retrieval times spread over next 72h; some buried boxes are due soon
         const dueH = ((seq * 13) % 72) + 1;
         const vessel = vessels[seq % vessels.length];
+        // Reefers need power and hazmat needs segregation, so both constrain
+        // where a box may be relocated during a reshuffle.
+        const type = seq % 11 === 0 ? "hazmat" : seq % 4 === 0 ? "reefer" : "dry";
+        const flow = dueH <= 24 ? "outbound" : seq % 5 === 0 ? "transit" : dueH > 60 ? "dwell" : "inbound";
         stack.push(id);
         containers[id] = {
           id,
           block: b,
           bay: bay + 1,
           tier: tier + 1,
+          type,
+          flow,
+          weightT: 8 + ((seq * 7) % 22),
+          destination: DESTINATIONS[seq % DESTINATIONS.length],
           vessel: vessel.name,
           retrievalEta: iso(now() + dueH * HOUR),
           dueInHours: dueH,
@@ -109,13 +190,94 @@ makeYard();
 export function yardSummary() {
   return Object.entries(yard.blocks).map(([key, blk]) => {
     const used = blk.bays.reduce((s, stack) => s + stack.length, 0);
+    const boxes = Object.values(containers).filter((c) => c.block === key);
     return {
       block: key,
       containers: used,
       capacity: blk.capacity,
       utilisationPct: Math.round((used / blk.capacity) * 100),
+      // Stack heights per bay drive the block heat-map in the yard view.
+      stacks: blk.bays.map((s) => s.length),
+      reefer: boxes.filter((c) => c.type === "reefer").length,
+      hazmat: boxes.filter((c) => c.type === "hazmat").length,
+      urgent: boxes.filter((c) => c.dueInHours <= 12).length,
     };
   });
+}
+
+// Headline counters for the yard screen.
+export function yardStats() {
+  const all = Object.values(containers);
+  const summary = yardSummary();
+  const capacity = summary.reduce((s, b) => s + b.capacity, 0);
+  return {
+    containersInYard: all.length,
+    totalBlocks: summary.length,
+    utilisationPct: Math.round((all.length / capacity) * 100),
+    urgentDepartures: all.filter((c) => c.dueInHours <= 12).length,
+    reefer: all.filter((c) => c.type === "reefer").length,
+    hazmat: all.filter((c) => c.type === "hazmat").length,
+  };
+}
+
+// The reshuffle plan, priced.
+//
+// "Current rehandles" is how many digs the yard would incur if every container
+// due in the window were fetched from where it sits today. "Optimised" is what
+// remains after pre-emptively relocating the worst-buried boxes during idle
+// crane time. The difference is what the savings figures are derived from.
+export function optimisationPlan(windowH = 12) {
+  const due = Object.values(containers).filter((c) => c.dueInHours <= windowH);
+
+  let currentRehandles = 0;
+  const candidates = [];
+  for (const c of due) {
+    const stack = yard.blocks[c.block].bays[c.bay - 1];
+    const buried = stack.length - stack.indexOf(c.id) - 1;
+    currentRehandles += buried;
+    if (buried >= 2) candidates.push({ c, buried });
+  }
+
+  // Work the most-buried, soonest-due boxes first.
+  candidates.sort((a, b) => b.buried - a.buried || a.c.dueInHours - b.c.dueInHours);
+  const chosen = candidates.slice(0, 10);
+
+  const moves = chosen.map(({ c, buried }, i) => {
+    const target = yard.blocks[c.block].bays
+      .map((s, idx) => ({ bay: idx + 1, height: s.length }))
+      .filter((t) => t.bay !== c.bay && t.height < 5)
+      .sort((a, b) => a.height - b.height)[0];
+    const reason =
+      c.type === "reefer" ? "Reefer due out — move to a powered slot near the gate"
+      : c.type === "hazmat" ? "Hazmat segregation — relocate clear of the stack"
+      : c.dueInHours <= 4 ? "Departing within 4h — surface before the window opens"
+      : "Buried under later-departing boxes — pre-dig during idle time";
+    return {
+      priority: i + 1,
+      containerId: c.id,
+      containerType: c.type,
+      from: `${c.block}${String(c.bay).padStart(2, "0")}-T${c.tier}`,
+      to: target ? `${c.block}${String(target.bay).padStart(2, "0")}` : `${c.block}-buffer`,
+      reason,
+      rehandlesAvoided: buried,
+      timeSavedMin: buried * MOVE_COST.minutesPerRehandle,
+      fuelSavedL: +(buried * MOVE_COST.litresPerRehandle).toFixed(1),
+      vessel: c.vessel,
+      dueInHours: c.dueInHours,
+    };
+  });
+
+  const rehandlesAvoided = moves.reduce((s, m) => s + m.rehandlesAvoided, 0);
+  return {
+    windowHours: windowH,
+    currentRehandles,
+    optimisedRehandles: Math.max(0, currentRehandles - rehandlesAvoided),
+    rehandlesSaved: rehandlesAvoided,
+    timeSavedMin: rehandlesAvoided * MOVE_COST.minutesPerRehandle,
+    fuelSavedL: +(rehandlesAvoided * MOVE_COST.litresPerRehandle).toFixed(1),
+    costSavedUSD: rehandlesAvoided * MOVE_COST.usdPerRehandle,
+    moves,
+  };
 }
 
 // Number of containers stacked on top of the target = dig moves required.

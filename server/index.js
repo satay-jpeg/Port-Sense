@@ -2,30 +2,82 @@ import "dotenv/config";
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { vessels, yardSummary, equipment, alerts, notificationLog, SENSOR_SPEC, yard, reshuffleRecommendations, digPlan } from "./state.js";
+import {
+  vessels, berths, carrierMix, yardSummary, yardStats, optimisationPlan,
+  equipment, alerts, notificationLog, SENSOR_SPEC, reshuffleRecommendations, digPlan,
+} from "./state.js";
 import { boot, addClient, getIntervalMs, setIntervalMs, setEventSink, broadcastTo } from "./simulator.js";
 import { ask, handleEvent, getMode, getProviderLabel, resetConversation, sessionCount, rateStatus } from "./agent.js";
 import { listEpisodes, getEpisode, setBroadcaster } from "./trace.js";
 import { listApprovals, resolveApproval, SUPERVISOR } from "./approvals.js";
+import {
+  verifyCredentials, createSession, cookieHeader, currentUser, requireAuth, DEMO_CREDENTIALS,
+} from "./auth.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(here, "..", "public");
 const app = express();
+app.disable("x-powered-by");
 app.use(express.json());
-app.use(express.static(path.join(here, "..", "public")));
+
+// ---- authentication ----
+// The login page and its assets are public; the dashboard and every data route
+// sit behind a session.
+app.get("/login", (req, res) => {
+  if (currentUser(req)) return res.redirect("/");
+  res.sendFile(path.join(publicDir, "login.html"));
+});
+
+app.get("/api/demo-credentials", (req, res) => {
+  // Published deliberately: this is a public demo, and judges need a way in.
+  res.json(DEMO_CREDENTIALS);
+});
+
+app.post("/api/login", (req, res) => {
+  const user = verifyCredentials(req.body?.username, req.body?.password);
+  if (!user) return res.status(401).json({ error: "Incorrect username or password" });
+  res.setHeader("Set-Cookie", cookieHeader(createSession(user)));
+  res.json({ ok: true, user });
+});
+
+app.post("/api/logout", (req, res) => {
+  res.setHeader("Set-Cookie", cookieHeader("", { clear: true }));
+  res.json({ ok: true });
+});
+
+app.get("/api/me", requireAuth({ api: true }), (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.get("/", requireAuth(), (req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
+});
+
+// Static assets (css/js/login page) stay public; index.html is served only via
+// the guarded route above so it can't be fetched around the login.
+app.use(express.static(publicDir, { index: false }));
+
+// Every data route requires a session from here on.
+app.use("/api", (req, res, next) => {
+  if (["/login", "/logout", "/demo-credentials", "/me"].includes(req.path)) return next();
+  return requireAuth({ api: true })(req, res, next);
+});
 
 // ---- dashboard data ----
 app.get("/api/state", (req, res) => {
   res.json({
     mode: getMode(),
     provider: getProviderLabel(),
+    user: req.user,
     intervalSeconds: getIntervalMs() / 1000,
     vessels,
+    berths,
+    carriers: carrierMix(),
     yard: {
       summary: yardSummary(),
+      stats: yardStats(),
+      plan: optimisationPlan(12),
       recommendations: reshuffleRecommendations(12),
-      blocks: Object.fromEntries(
-        Object.entries(yard.blocks).map(([k, b]) => [k, b.bays.map((s) => s.length)])
-      ),
     },
     equipment: equipment.map((e) => ({
       id: e.id,
