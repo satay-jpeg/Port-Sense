@@ -90,10 +90,31 @@ answer citing delay factors, and the dashboard should switch to Vessel Arrivals.
 You can also hit `https://<your-url>/healthz` — it returns the active provider
 and session count without needing the UI.
 
-**If the pill says rule-based:** open Render → your service → **Logs**. A line
-starting `[portsense] Gemini unavailable` gives the reason. Most common causes
-are a mistyped key, or the key's Google Cloud project not having the Generative
-Language API enabled (AI Studio normally does this for you).
+**If the pill says rule-based**, it now names the actual cause:
+
+| Pill text | Cause | Fix |
+|---|---|---|
+| `rule-based (no API key)` | `GEMINI_API_KEY` isn't set on the service | Add it in Render → Environment |
+| `rule-based (Gemini error: 400 …)` | Key is malformed or rejected | Re-copy the key from AI Studio |
+| `rule-based (Gemini error: 404 …)` | Model name doesn't exist for your key | Run `npm run models` and pin `GEMINI_MODEL` (below) |
+
+Render → your service → **Logs** shows the full `[portsense] Gemini unavailable`
+line with the provider's own message.
+
+### Pinning the right model
+
+Free-tier model names change over time, so the default can go stale. The app
+**self-heals** — on a 404 it asks Google which models your key can reach, switches
+to the best available one, and answers the question anyway. To skip that round
+trip and make it deterministic, pin the model explicitly:
+
+```bash
+cd "PSA Code Sprint/portsense"
+npm run models          # prints every model your key can reach, ★ = recommended
+```
+
+Then add the recommended value in Render → **Environment** →
+`GEMINI_MODEL` = `<the ★ model>` and redeploy.
 
 ---
 

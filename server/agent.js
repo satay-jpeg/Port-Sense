@@ -102,6 +102,10 @@ function getClient() {
   return client;
 }
 
+// Why the AI path is unavailable, if it is. Kept so the dashboard can tell the
+// difference between "no key configured" and "key works but something failed".
+let lastError = null;
+
 export function getMode() {
   if (aiAvailable === false) return "rules";
   return "ai";
@@ -109,8 +113,48 @@ export function getMode() {
 
 // Human-readable provider label for the dashboard pill.
 export function getProviderLabel() {
-  if (aiAvailable === false) return "rule-based (no API key)";
+  if (aiAvailable === false) {
+    if (provider.kind === "rules") return "rule-based (no API key)";
+    // A key IS configured but the provider rejected us — say what went wrong
+    // rather than blaming a missing key.
+    return `rule-based (${provider.label} error: ${lastError || "unknown"})`;
+  }
   return provider.model ? `${provider.label} · ${provider.model}` : provider.label;
+}
+
+// Model IDs churn on free tiers. When the configured model 404s, ask the
+// provider what it actually offers and pick the best available match, so a
+// renamed or retired model self-heals instead of dropping to the rule router.
+let modelDiscoveryTried = false;
+
+async function rediscoverModel() {
+  if (modelDiscoveryTried || provider.kind !== "openai") return false;
+  modelDiscoveryTried = true;
+  try {
+    const res = await getClient().models.list();
+    // Gemini returns ids as "models/gemini-x"; other providers return bare ids.
+    const ids = res.data.map((m) => String(m.id).replace(/^models\//, ""));
+    // Keep only chat-capable models; drop embedding/image/audio endpoints.
+    const usable = ids.filter((id) => !/embed|aqa|imagen|veo|tts|image|vision/i.test(id));
+    // Rank: prefer "flash" (fast + free-tier friendly), penalise "lite" and
+    // experimental builds, and break ties by the highest version number.
+    const score = (id) => {
+      let s = 0;
+      if (/flash/i.test(id)) s += 100;
+      if (/lite/i.test(id)) s -= 30;
+      if (/exp|preview|thinking/i.test(id)) s -= 50;
+      s += parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
+      return s;
+    };
+    const pick = usable.sort((a, b) => score(b) - score(a))[0];
+    if (!pick || pick === provider.model) return false;
+    console.warn(`[portsense] Model "${provider.model}" unavailable — switching to "${pick}".`);
+    provider.model = pick;
+    return true;
+  } catch (err) {
+    console.warn(`[portsense] Could not list models: ${err.message}`);
+    return false;
+  }
 }
 
 // Per-browser conversations. A single deployed instance is used by several
@@ -407,9 +451,25 @@ export async function ask(question, sessionId = "default") {
       aiAvailable = true;
       return answer;
     } catch (err) {
+      // A 404 (or an explicit "model not found") means the model ID is stale,
+      // not that the key is bad. Ask the provider what it offers and retry once.
+      const modelMissing =
+        err?.status === 404 || /model.*(not found|does not exist)|not found.*model/i.test(String(err?.message || ""));
+      if (modelMissing && (await rediscoverModel())) {
+        try {
+          session.history = snapshot;
+          const answer = await askOpenAICompatible(question, session);
+          aiAvailable = true;
+          return answer;
+        } catch (retryErr) {
+          err = retryErr; // fall through to the normal handling below
+        }
+      }
+
       if (isPermanentFailure(err) || aiAvailable === null) {
         // No usable credentials/model — use the deterministic router from here on.
         aiAvailable = false;
+        lastError = `${err.status || "error"} ${String(err.message || "").slice(0, 80)}`;
         sessions.clear();
         console.warn(
           `[portsense] ${provider.label} unavailable (${err.status || "error"}: ${err.message}). ` +

@@ -30,16 +30,40 @@ if (!process.env[keyEnv]) {
   process.exit(1);
 }
 
-const client = new OpenAI({ apiKey: process.env[keyEnv], baseURL });
+const client = new OpenAI({
+  apiKey: process.env[keyEnv],
+  baseURL: process.env.AGENT_BASE_URL || baseURL,
+});
+
+// Same ranking the server uses when it auto-recovers from a retired model.
+function score(id) {
+  let s = 0;
+  if (/flash/i.test(id)) s += 100;
+  if (/lite/i.test(id)) s -= 30;
+  if (/exp|preview|thinking/i.test(id)) s -= 50;
+  s += parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
+  return s;
+}
 
 try {
   const res = await client.models.list();
-  const ids = res.data.map((m) => m.id).sort();
-  console.log(`\n${name} — ${ids.length} models reachable with this key:\n`);
-  for (const id of ids) console.log("  " + id);
-  console.log(
-    `\nSet the one you want in .env, e.g. ${name.toUpperCase()}_MODEL=${ids[0] || "<model-id>"}\n`
-  );
+  const ids = res.data.map((m) => String(m.id).replace(/^models\//, "")).sort();
+  const chat = ids.filter((id) => !/embed|aqa|imagen|veo|tts|image|vision/i.test(id));
+  const best = chat.slice().sort((a, b) => score(b) - score(a))[0];
+
+  console.log(`\n${name} — ${ids.length} models reachable with this key\n`);
+  console.log("Chat-capable (usable by PortSense):");
+  for (const id of chat) console.log(`  ${id === best ? "★" : " "} ${id}`);
+  const others = ids.filter((id) => !chat.includes(id));
+  if (others.length) console.log(`\nOther (embedding/image/audio — not usable): ${others.length}`);
+
+  if (best) {
+    console.log(`\n★ Recommended: ${best}`);
+    console.log(`\nPin it locally in .env:\n  ${name.toUpperCase()}_MODEL=${best}`);
+    console.log(`On Render, add the same as an environment variable:\n  ${name.toUpperCase()}_MODEL = ${best}\n`);
+  } else {
+    console.log("\nNo chat-capable models found for this key.\n");
+  }
 } catch (err) {
   console.error(`Failed to list models for ${name}: ${err.status || ""} ${err.message}`);
   if (err.status === 401 || err.status === 403) {
