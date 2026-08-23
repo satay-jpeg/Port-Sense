@@ -35,13 +35,19 @@ const client = new OpenAI({
   baseURL: process.env.AGENT_BASE_URL || baseURL,
 });
 
-// Same ranking the server uses when it auto-recovers from a retired model.
+// Mirrors modelScore() in server/agent.js — kept as a local copy so this script
+// doesn't pull in the whole server module graph. Tuned for free-tier quota
+// rather than raw capability: on Gemini's free tier, Flash-Lite allows 15
+// req/min and 1,000/day while preview models are far tighter, and a model that
+// answers every time beats a stronger one that spends the demo rate-limited.
 function score(id) {
   let s = 0;
   if (/flash/i.test(id)) s += 100;
-  if (/lite/i.test(id)) s -= 30;
-  if (/exp|preview|thinking/i.test(id)) s -= 50;
-  s += parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
+  if (/lite/i.test(id)) s += 12;
+  if (/pro/i.test(id)) s -= 60;
+  if (/exp|preview|thinking/i.test(id)) s -= 40;
+  const ver = parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
+  s += ver <= 2.9 ? ver * 2 : -ver;
   return s;
 }
 

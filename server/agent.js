@@ -117,6 +117,43 @@ function getClient() {
 // difference between "no key configured" and "key works but something failed".
 let lastError = null;
 
+// ---------------------------------------------------------------------------
+// Self-throttling
+// ---------------------------------------------------------------------------
+// Free tiers are tight (Gemini 2.5 Flash-Lite is 15 req/min; 2.5 Flash is 10)
+// and ONE operator question costs several requests because every tool
+// round-trip is its own call. Rather than let the provider 429 us, we track our
+// own spend over a rolling minute and step aside to the rule-based router when
+// the budget is gone — which is instant, rather than a failed call plus retry.
+//
+// Autonomous event analysis is capped below the full budget so background work
+// can never starve a human who is asking a question.
+const RPM_BUDGET = Number(process.env.AGENT_RPM || 10);
+const AUTONOMOUS_SHARE = 0.5; // background work may use at most half the budget
+const callTimes = [];
+
+function recentCalls() {
+  const cutoff = Date.now() - 60_000;
+  while (callTimes.length && callTimes[0] < cutoff) callTimes.shift();
+  return callTimes.length;
+}
+
+// `budgeted` = how many requests this turn is likely to need (tool loops cost
+// several), so we don't start a turn we can't finish.
+function canSpend({ autonomous = false, budgeted = 3 } = {}) {
+  const ceiling = autonomous ? Math.floor(RPM_BUDGET * AUTONOMOUS_SHARE) : RPM_BUDGET;
+  return recentCalls() + budgeted <= ceiling;
+}
+
+function noteCall() {
+  callTimes.push(Date.now());
+}
+
+export function rateStatus() {
+  const used = recentCalls();
+  return { used, budget: RPM_BUDGET, remaining: Math.max(0, RPM_BUDGET - used) };
+}
+
 export function getMode() {
   if (aiAvailable === false) return "rules";
   return "ai";
@@ -138,6 +175,24 @@ export function getProviderLabel() {
 // renamed or retired model self-heals instead of dropping to the rule router.
 let modelDiscoveryTried = false;
 
+// Ranking is tuned for FREE-TIER RELIABILITY, not raw capability. On Gemini's
+// free tier the quota differences are large and they decide whether a live demo
+// survives: 2.5 Flash-Lite allows 15 req/min and 1,000/day, 2.5 Flash allows
+// 10/min and 250/day, and the newer preview models are tighter still. A
+// slightly weaker model that answers every time beats a stronger one that
+// spends the demo rate-limited. Override with GEMINI_MODEL to force a choice.
+export function modelScore(id) {
+  let s = 0;
+  if (/flash/i.test(id)) s += 100;      // flash tiers carry the free quota
+  if (/lite/i.test(id)) s += 12;        // lite has the most generous limits
+  if (/pro/i.test(id)) s -= 60;         // pro is paid-only or heavily capped
+  if (/exp|preview|thinking/i.test(id)) s -= 40; // preview builds = tightest quota
+  // Prefer mature versions: newest previews are the most restricted.
+  const ver = parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
+  s += ver <= 2.9 ? ver * 2 : -ver;
+  return s;
+}
+
 async function rediscoverModel() {
   if (modelDiscoveryTried || provider.kind !== "openai") return false;
   modelDiscoveryTried = true;
@@ -147,17 +202,7 @@ async function rediscoverModel() {
     const ids = res.data.map((m) => String(m.id).replace(/^models\//, ""));
     // Keep only chat-capable models; drop embedding/image/audio endpoints.
     const usable = ids.filter((id) => !/embed|aqa|imagen|veo|tts|image|vision/i.test(id));
-    // Rank: prefer "flash" (fast + free-tier friendly), penalise "lite" and
-    // experimental builds, and break ties by the highest version number.
-    const score = (id) => {
-      let s = 0;
-      if (/flash/i.test(id)) s += 100;
-      if (/lite/i.test(id)) s -= 30;
-      if (/exp|preview|thinking/i.test(id)) s -= 50;
-      s += parseFloat((id.match(/(\d+\.?\d*)/) || [])[1] || "0");
-      return s;
-    };
-    const pick = usable.sort((a, b) => score(b) - score(a))[0];
+    const pick = usable.sort((a, b) => modelScore(b) - modelScore(a))[0];
     if (!pick || pick === provider.model) return false;
     console.warn(`[portsense] Model "${provider.model}" unavailable — switching to "${pick}".`);
     provider.model = pick;
@@ -273,6 +318,7 @@ async function askOpenAICompatible(question, session, episode = null) {
   const toolsUsed = [];
   let message;
   for (let iter = 0; iter < 6; iter++) {
+    noteCall();
     const completion = await api.chat.completions.create({
       model: provider.model,
       messages: history,
@@ -330,6 +376,7 @@ async function askClaude(question, session, episode = null) {
   const toolsUsed = [];
   let response;
   for (let iter = 0; iter < 6; iter++) {
+    noteCall();
     response = await anthropic.messages.create({
       model: CLAUDE_MODEL,
       max_tokens: 8192,
@@ -524,6 +571,15 @@ export async function ask(question, sessionId = "default") {
     return { ...answer, episodeId: episode.id };
   };
 
+  // Step aside before spending a request we don't have budget for — a rules
+  // answer now beats a 429 and a retry.
+  if (aiAvailable !== false && !canSpend({ budgeted: 3 })) {
+    const r = rateStatus();
+    addStep(episode, STEP.FALLBACK,
+      `Rate-limit budget spent (${r.used}/${r.budget} calls in the last minute) — answering from the rule-based router to stay inside the free tier`);
+    return finish({ ...answerWithRules(question, episode), note: "rate-limited" });
+  }
+
   if (aiAvailable !== false) {
     const session = getSession(sessionId);
     const snapshot = session.history.slice();
@@ -595,6 +651,14 @@ export async function handleEvent({ triggerType, summary, detail = null }) {
   const equipmentId = detail?.equipmentId || null;
 
   try {
+    // Background analysis yields to operator questions: it may only use part of
+    // the per-minute budget, so a human asking something always gets the model.
+    if (aiAvailable !== false && !canSpend({ autonomous: true, budgeted: 4 })) {
+      const r = rateStatus();
+      addStep(episode, STEP.FALLBACK,
+        `Reserving remaining model budget for operator questions (${r.used}/${r.budget} used this minute) — assessing with rules instead`);
+      throw Object.assign(new Error("rate budget reserved for operators"), { status: 429, quiet: true });
+    }
     if (aiAvailable !== false) {
       const session = { history: [] }; // one-shot context; not tied to a browser
       const prompt = `${AUTONOMOUS_PROMPT}\n\nEVENT: ${summary}\nDETAIL: ${JSON.stringify(detail)}`;
@@ -611,7 +675,10 @@ export async function handleEvent({ triggerType, summary, detail = null }) {
       return { ...answer, episodeId: episode.id };
     }
   } catch (err) {
-    addStep(episode, STEP.FALLBACK, `Model unavailable during autonomous analysis (${err.status || "error"}) — using rule-based assessment`);
+    // `quiet` marks the deliberate budget-reservation path, already traced above.
+    if (!err.quiet) {
+      addStep(episode, STEP.FALLBACK, `Model unavailable during autonomous analysis (${err.status || "error"}) — using rule-based assessment`);
+    }
   }
 
   // Rule-based autonomous assessment — keeps this path working with no API key.

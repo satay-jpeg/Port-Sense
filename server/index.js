@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { vessels, yardSummary, equipment, alerts, notificationLog, SENSOR_SPEC, yard, reshuffleRecommendations, digPlan } from "./state.js";
 import { boot, addClient, getIntervalMs, setIntervalMs, setEventSink, broadcastTo } from "./simulator.js";
-import { ask, handleEvent, getMode, getProviderLabel, resetConversation, sessionCount } from "./agent.js";
+import { ask, handleEvent, getMode, getProviderLabel, resetConversation, sessionCount, rateStatus } from "./agent.js";
 import { listEpisodes, getEpisode, setBroadcaster } from "./trace.js";
 import { listApprovals, resolveApproval, SUPERVISOR } from "./approvals.js";
 
@@ -108,7 +108,13 @@ app.post("/api/chat/reset", (req, res) => {
 
 // Health probe for uptime pingers (keeps a free-tier instance from idling).
 app.get("/healthz", (req, res) => {
-  res.json({ ok: true, provider: getProviderLabel(), sessions: sessionCount(), uptime: process.uptime() });
+  res.json({
+    ok: true,
+    provider: getProviderLabel(),
+    sessions: sessionCount(),
+    rate: rateStatus(),
+    uptime: process.uptime(),
+  });
 });
 
 // ---- execution trace ----

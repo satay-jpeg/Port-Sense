@@ -101,6 +101,31 @@ and session count without needing the UI.
 Render → your service → **Logs** shows the full `[portsense] Gemini unavailable`
 line with the provider's own message.
 
+### Rate limits — pick the model with the best quota
+
+Free-tier limits differ sharply, and **one question costs 2–4 API requests**
+because every tool round-trip is its own call:
+
+| Model | Requests/min | Requests/day |
+|---|---:|---:|
+| `gemini-2.5-flash-lite` | **15** | **1,000** |
+| `gemini-2.5-flash` | 10 | 250 |
+| Gemini 3.x preview models | tighter | tighter |
+
+For a demo, **`gemini-2.5-flash-lite` is the right choice** — the extra quota
+matters far more than the small capability difference. Set it on Render as
+`GEMINI_MODEL`.
+
+RPM is a rolling 60-second window, so a throttle clears in about a minute. The
+daily cap resets at midnight Pacific. Limits apply **per Google Cloud project**,
+not per key, so making a second key in the same project won't help.
+
+PortSense self-throttles: it tracks its own spend and steps aside to the
+rule-based router *before* the provider would reject it, recording the decision
+in the trace. Tune with `AGENT_RPM` (default 10) — set it at or just under your
+model's limit. Autonomous alert analysis is capped at half the budget so
+background work never starves an operator asking a question.
+
 ### Pinning the right model
 
 Free-tier model names change over time, so the default can go stale. The app
