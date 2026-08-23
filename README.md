@@ -83,6 +83,9 @@ The header pill always shows which mode is live.
 
 ## Deploy
 
+**→ Step-by-step Render free-tier guide: [DEPLOY.md](DEPLOY.md)** — gives judges a
+public URL where the AI works without them needing any key.
+
 Any Node host works — the app is a single process with no database.
 
 **Docker (works on Render, Railway, Fly.io, AWS App Runner, Azure Container Apps…):**
