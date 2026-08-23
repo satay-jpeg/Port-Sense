@@ -3,8 +3,10 @@ import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { vessels, yardSummary, equipment, alerts, notificationLog, SENSOR_SPEC, yard, reshuffleRecommendations, digPlan } from "./state.js";
-import { boot, addClient, getIntervalMs, setIntervalMs } from "./simulator.js";
-import { ask, getMode, getProviderLabel, resetConversation, sessionCount } from "./agent.js";
+import { boot, addClient, getIntervalMs, setIntervalMs, setEventSink, broadcastTo } from "./simulator.js";
+import { ask, handleEvent, getMode, getProviderLabel, resetConversation, sessionCount } from "./agent.js";
+import { listEpisodes, getEpisode, setBroadcaster } from "./trace.js";
+import { listApprovals, resolveApproval, SUPERVISOR } from "./approvals.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -42,6 +44,9 @@ app.get("/api/state", (req, res) => {
     })),
     alerts,
     notifications: notificationLog.slice(0, 12),
+    trace: listEpisodes(25),
+    approvals: listApprovals(),
+    supervisor: SUPERVISOR,
   });
 });
 
@@ -106,7 +111,48 @@ app.get("/healthz", (req, res) => {
   res.json({ ok: true, provider: getProviderLabel(), sessions: sessionCount(), uptime: process.uptime() });
 });
 
+// ---- execution trace ----
+app.get("/api/trace", (req, res) => {
+  res.json({ episodes: listEpisodes(Number(req.query.limit) || 25) });
+});
+
+app.get("/api/trace/:id", (req, res) => {
+  const ep = getEpisode(req.params.id.toUpperCase());
+  if (!ep) return res.status(404).json({ error: "episode not found" });
+  res.json(ep);
+});
+
+// ---- human approvals ----
+app.get("/api/approvals", (req, res) => {
+  res.json({
+    approvals: listApprovals({ includeResolved: req.query.all === "1" }),
+    supervisor: SUPERVISOR,
+  });
+});
+
+app.post("/api/approvals/:id", (req, res) => {
+  const decision = String(req.body?.decision || "").toLowerCase();
+  if (!["approve", "reject"].includes(decision)) {
+    return res.status(400).json({ error: "decision must be 'approve' or 'reject'" });
+  }
+  const out = resolveApproval(req.params.id.toUpperCase(), decision, {
+    by: String(req.body?.by || "operator").slice(0, 60),
+    reason: req.body?.reason ? String(req.body.reason).slice(0, 200) : null,
+    episodeLookup: getEpisode,
+  });
+  if (out.error) return res.status(409).json(out);
+  res.json(out);
+});
+
 const PORT = Number(process.env.PORT || 3000);
+
+// Stream trace updates to the dashboard over the existing SSE channel, and let
+// the simulator hand operational events to the agent for autonomous analysis.
+setBroadcaster(broadcastTo);
+setEventSink((event) => {
+  handleEvent(event).catch((err) => console.error("[portsense] autonomous event failed:", err));
+});
+
 boot();
 app.listen(PORT, () => {
   console.log(`PortSense running on http://localhost:${PORT}`);

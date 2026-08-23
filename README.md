@@ -12,6 +12,24 @@ The **agentic workflow**: operators ask questions in plain language ("Why is Kot
 
 The agent runs on **Google Gemini's free tier** by default — no credit card, no billing risk during judging.
 
+## How it meets the agentic requirements
+
+| Requirement | Where it happens | See it in the demo |
+|---|---|---|
+| **Process varied inputs** — event log, state change, operational alert, process metric, user request | Operator questions enter via `POST /api/chat`; the simulator pushes **operational alerts** straight into the agent through `setEventSink` ([simulator.js](server/simulator.js)) — no human prompt needed | Agent Trace tab shows episodes tagged `operator request` **and** `operational alert` |
+| **Analyse input, identify the objective** | Every episode opens with an `analysis` step; autonomous events are assessed for severity and impact | First two rows of any trace episode |
+| **Determine a course of action** | `plan` step — for alerts the agent recommends concrete steps (stop assigning moves, raise a maintenance job, redistribute to named spare units) | Wait ~1–2 min for the RTG-02 critical alert |
+| **Orchestrate tools/systems/workflows** | 11 tools over vessels, yard and equipment, driven in a multi-step loop; all calls funnel through one `runTool` choke point | `tool call` / `result` steps with real arguments |
+| **Handle uncertainty & incomplete information** | Ambiguous input triggers a clarifying question instead of a guess; low-confidence predictions are flagged; missing data is stated, never invented | Ask *"the crane is playing up"* → agent asks which of the 7 units |
+| **Handle tool failures** | Tool errors are captured as `tool_error` and returned to the model to recover from; provider outages fall back to the rule-based router; a retired model ID is auto-rediscovered | Trace shows `fallback` / `tool error` steps when they occur |
+| **Human review, approval, escalation** | Read-only tools run freely; **state-changing tools are proposed, not executed** ([approvals.js](server/approvals.js)) and wait for operator Approve/Reject. Critical severity auto-escalates to the Duty Terminal Manager | Ask *"sample sensors every 30 seconds"* → approval card appears, interval does **not** change until you approve |
+| **Clear execution trace** | Every episode records input → analysis → plan → tool calls (with arguments) → results/errors → approvals → actions → escalations → outcome, streamed live over SSE | **Agent Trace** tab; click any episode to expand |
+
+The design decision worth calling out: an autonomous model should not silently
+reconfigure equipment monitoring in a live port. Anything that mutates terminal
+state is a **proposal** with a stated risk level and rationale, and the trace
+records who approved it and when.
+
 ## Architecture
 
 ```

@@ -15,6 +15,10 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { toolDefinitions, executeTool, TOOL_VIEWS, findEquipment, currentIntervalSeconds } from "./tools.js";
+import {
+  startEpisode, addStep, endEpisode, getEpisode, STEP, TRIGGER_TYPES, summariseResult,
+} from "./trace.js";
+import { requiresApproval, proposeAction, escalate, SUPERVISOR } from "./approvals.js";
 
 const CLAUDE_MODEL = "claude-opus-4-8";
 
@@ -81,7 +85,14 @@ You have live tools covering three solution areas:
 2. Yard reshuffling — dig-out plans for buried containers and pre-emptive reshuffle recommendations.
 3. Equipment predictive maintenance — live sensor readings, configurable sampling interval, anomaly alerts and operator notifications.
 
-Always answer from tool results, never from memory. Be concise and operational: lead with the answer, use short bullet points for lists, include concrete numbers (hours, moves, sensor values with units). If the user asks something outside port operations, briefly redirect them to what you can help with. The dashboard automatically opens the panel related to the tools you use, so you don't need to describe the UI.`;
+Always answer from tool results, never from memory. Be concise and operational: lead with the answer, use short bullet points for lists, include concrete numbers (hours, moves, sensor values with units). If the user asks something outside port operations, briefly redirect them to what you can help with. The dashboard automatically opens the panel related to the tools you use, so you don't need to describe the UI.
+
+Handling uncertainty:
+- If a request is ambiguous (e.g. "the crane is playing up" when there are three quay cranes and four RTGs), ask ONE specific clarifying question instead of guessing. Say what you'd need to proceed.
+- If a tool returns an error or empty result, say so plainly, state what you could not determine, and suggest the next step. Never invent data to fill the gap.
+- When a prediction carries a confidence value, quote it. Flag low-confidence figures (below 80%) as provisional.
+
+Actions that change terminal state (changing the sensor sampling interval, acknowledging an alert, injecting a fault) are NOT executed directly — they are proposed and require operator approval. When you call one of those tools you will get back a status saying approval is pending. Tell the operator exactly what you proposed and that it awaits their approval; do not claim the change has been made.`;
 
 let client = null;
 // null = untested; true = provider answered; false = fell back to rules for good.
@@ -199,6 +210,37 @@ function viewForTools(toolsUsed) {
   return null;
 }
 
+// Single choke point for every tool invocation, whichever adapter is driving.
+// It records the call on the trace, diverts state-changing tools into the
+// approval queue instead of running them, and records the result or failure.
+function runTool(name, args = {}, episode = null) {
+  addStep(episode, STEP.TOOL_CALL, `${name}(${JSON.stringify(args).slice(0, 140)})`, { tool: name, args });
+
+  if (requiresApproval(name)) {
+    const proposal = proposeAction({ tool: name, args, episode });
+    return {
+      status: "awaiting_human_approval",
+      approval_id: proposal.id,
+      proposed: proposal.description,
+      note: "This changes terminal state, so it has been queued for operator approval. It has NOT been applied yet.",
+    };
+  }
+
+  let result;
+  try {
+    result = executeTool(name, args);
+  } catch (err) {
+    result = { error: String(err.message || err) };
+  }
+
+  if (result && result.error) {
+    addStep(episode, STEP.TOOL_ERROR, `${name} failed — ${result.error}`, { tool: name });
+  } else {
+    addStep(episode, STEP.TOOL_RESULT, `${name} → ${summariseResult(result)}`, { tool: name });
+  }
+  return result;
+}
+
 // --- OpenAI-compatible adapter (Gemini / Groq / Cerebras / OpenRouter) -------
 
 // The tool surface is authored in Anthropic shape; translate once at startup.
@@ -217,7 +259,7 @@ const openAiTools = toolDefinitions.map((t) => ({
   },
 }));
 
-async function askOpenAICompatible(question, session) {
+async function askOpenAICompatible(question, session, episode = null) {
   const api = getClient();
   let history = session.history;
   if (!history.length) history.push({ role: "system", content: SYSTEM_PROMPT });
@@ -251,9 +293,10 @@ async function askOpenAICompatible(question, session) {
       try {
         // Arguments arrive as a JSON string; a model can emit malformed JSON.
         const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-        result = executeTool(call.function.name, args);
+        result = runTool(call.function.name, args, episode);
       } catch (err) {
-        result = { error: String(err.message || err) };
+        result = { error: `Could not parse tool arguments: ${String(err.message || err)}` };
+        addStep(episode, STEP.TOOL_ERROR, `${call.function.name} — malformed arguments`, { tool: call.function.name });
       }
       history.push({
         role: "tool",
@@ -275,7 +318,7 @@ async function askOpenAICompatible(question, session) {
 
 // --- Anthropic adapter -------------------------------------------------------
 
-async function askClaude(question, session) {
+async function askClaude(question, session, episode = null) {
   const anthropic = getClient();
   let history = session.history;
   history.push({ role: "user", content: question });
@@ -305,12 +348,7 @@ async function askClaude(question, session) {
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
       toolsUsed.push(block.name);
-      let result;
-      try {
-        result = executeTool(block.name, block.input);
-      } catch (err) {
-        result = { error: String(err.message || err) };
-      }
+      const result = runTool(block.name, block.input, episode);
       results.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -339,14 +377,36 @@ function fmtEta(isoStr) {
   return d.toLocaleString("en-SG", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-function answerWithRules(question) {
+function answerWithRules(question, episode = null) {
   const q = question.toLowerCase();
   const toolsUsed = [];
   const run = (name, input) => {
     toolsUsed.push(name);
-    return executeTool(name, input);
+    return runTool(name, input, episode);
   };
   let text;
+
+  // Ambiguity check: a bare equipment-type mention with several candidates and
+  // no specific unit is under-specified — ask rather than guess.
+  const bareType = q.match(/\b(crane|rtg|agv|quay crane)\b/);
+  const hasSpecificUnit = /\b(qc|rtg|agv)[- ]?\d{1,2}\b/i.test(question);
+  if (bareType && !hasSpecificUnit && /(fault|problem|issue|acting|playing up|wrong|broken|check|look)/.test(q)) {
+    const fleet = executeTool("get_equipment_status", {});
+    const candidates = fleet
+      .filter((e) => e.type.toLowerCase().includes(bareType[1].replace("quay crane", "quay")))
+      .map((e) => e.id);
+    const options = (candidates.length ? candidates : fleet.map((e) => e.id)).join(", ");
+    addStep(episode, STEP.UNCERTAINTY, `Ambiguous target: "${bareType[1]}" matches ${candidates.length || fleet.length} machines`);
+    addStep(episode, STEP.CLARIFICATION, "Asked the operator which unit they mean");
+    return {
+      text: `Which unit do you mean? That matches: ${options}.\nTell me the ID (e.g. "check RTG-02") and I'll pull its sensor history.`,
+      view: "equipment",
+      toolsUsed: [],
+      mode: "rules",
+      provider: "rule-based",
+      needsClarification: true,
+    };
+  }
 
   const cntrMatch = question.match(/CNTR-?\d{3,4}/i);
   const alertMatch = question.match(/AL-?\d{2,3}/i);
@@ -355,10 +415,14 @@ function answerWithRules(question) {
 
   if (secondsMatch && /(interval|monitor|poll|sample|measure|check|read)/.test(q)) {
     const r = run("set_monitoring_interval", { seconds: Number(secondsMatch[1]) });
-    text = `Done — ${r.message}. All equipment sensors now report on the new cadence.`;
+    text = r.status === "awaiting_human_approval"
+      ? `Proposed: ${r.proposed}.\nThis changes how quickly anomalies are detected across the fleet, so it needs your approval — see the Approvals panel (${r.approval_id}). Nothing has changed yet.`
+      : `Done — ${r.message}.`;
   } else if (alertMatch && /(ack|clear|close|resolve)/.test(q)) {
     const r = run("acknowledge_alert", { alert_id: alertMatch[0].toUpperCase() });
-    text = r.error ? r.error : `Acknowledged ${r.alert.id} (${r.alert.message}).`;
+    text = r.status === "awaiting_human_approval"
+      ? `Proposed: ${r.proposed}.\nAcknowledging stops the alert being surfaced to operators, so it needs your approval (${r.approval_id}). The alert is still active.`
+      : r.error || `Acknowledged ${r.alert.id}.`;
   } else if (/(alert|anomal|fault|notif)/.test(q) && !/simulate/.test(q)) {
     const r = run("get_alerts", {});
     text = r.alerts.length
@@ -367,7 +431,9 @@ function answerWithRules(question) {
       : "No active alerts. All equipment sensors are within normal thresholds.";
   } else if (/simulate|inject|demo.*fault/.test(q) && eqMatch) {
     const r = run("simulate_fault", { equipment_id: `${eqMatch[1]}-${eqMatch[2].padStart(2, "0")}`.toUpperCase() });
-    text = r.error || r.message;
+    text = r.status === "awaiting_human_approval"
+      ? `Proposed: ${r.proposed}.\nThis drives a machine into an alarm state, so it's high risk and needs your approval (${r.approval_id}).`
+      : r.error || r.message;
   } else if (cntrMatch) {
     const id = cntrMatch[0].toUpperCase().replace(/^CNTR(\d)/, "CNTR-$1");
     const r = run("plan_container_retrieval", { container_id: id });
@@ -441,26 +507,44 @@ function isPermanentFailure(err) {
 }
 
 export async function ask(question, sessionId = "default") {
+  const episode = startEpisode({
+    triggerType: TRIGGER_TYPES.USER_REQUEST,
+    summary: question,
+    sessionId,
+  });
+  addStep(episode, STEP.ANALYSIS, `Interpreting operator request; selecting tools from the ${toolDefinitions.length}-tool terminal surface`);
+
+  const finish = (answer) => {
+    // An episode that queued an approval stays open until the operator decides.
+    if (episode.status !== "awaiting_approval") {
+      endEpisode(episode, "completed", answer.needsClarification
+        ? "Clarification requested from operator"
+        : `Responded via ${answer.mode === "ai" ? getProviderLabel() : "rule-based router"}`);
+    }
+    return { ...answer, episodeId: episode.id };
+  };
+
   if (aiAvailable !== false) {
     const session = getSession(sessionId);
     const snapshot = session.history.slice();
     try {
       const answer = provider.kind === "claude"
-        ? await askClaude(question, session)
-        : await askOpenAICompatible(question, session);
+        ? await askClaude(question, session, episode)
+        : await askOpenAICompatible(question, session, episode);
       aiAvailable = true;
-      return answer;
+      return finish(answer);
     } catch (err) {
       // A 404 (or an explicit "model not found") means the model ID is stale,
       // not that the key is bad. Ask the provider what it offers and retry once.
       const modelMissing =
         err?.status === 404 || /model.*(not found|does not exist)|not found.*model/i.test(String(err?.message || ""));
       if (modelMissing && (await rediscoverModel())) {
+        addStep(episode, STEP.FALLBACK, `Model unavailable — rediscovered and switched to "${provider.model}", retrying`);
         try {
           session.history = snapshot;
-          const answer = await askOpenAICompatible(question, session);
+          const answer = await askOpenAICompatible(question, session, episode);
           aiAvailable = true;
-          return answer;
+          return finish(answer);
         } catch (retryErr) {
           err = retryErr; // fall through to the normal handling below
         }
@@ -471,6 +555,8 @@ export async function ask(question, sessionId = "default") {
         aiAvailable = false;
         lastError = `${err.status || "error"} ${String(err.message || "").slice(0, 80)}`;
         sessions.clear();
+        addStep(episode, STEP.FALLBACK,
+          `${provider.label} unavailable (${err.status || "error"}) — switching to the rule-based router for this session`);
         console.warn(
           `[portsense] ${provider.label} unavailable (${err.status || "error"}: ${err.message}). ` +
           `Falling back to the rule-based router.`
@@ -478,11 +564,111 @@ export async function ask(question, sessionId = "default") {
       } else {
         // Transient (rate limit, 5xx) on a previously working provider: answer
         // this turn with rules but keep trying the model on later turns.
+        addStep(episode, STEP.FALLBACK, `${provider.label} failed transiently (${err.status || "error"}) — answering from rules, will retry the model next turn`);
         console.warn(`[portsense] ${provider.label} call failed transiently: ${err.message}`);
         session.history = snapshot; // discard the partial turn so the next call is well-formed
-        return { ...answerWithRules(question), note: "transient-ai-error" };
+        return finish({ ...answerWithRules(question, episode), note: "transient-ai-error" });
       }
     }
   }
-  return answerWithRules(question);
+  return finish(answerWithRules(question, episode));
+}
+
+// ---------------------------------------------------------------------------
+// Autonomous event ingestion
+// ---------------------------------------------------------------------------
+// Inputs that are not user requests — operational alerts, state changes,
+// process metrics — enter here. The agent analyses them unprompted, decides a
+// course of action, and escalates when severity warrants a human.
+
+const AUTONOMOUS_PROMPT = `An operational event has just been raised by the terminal's monitoring system. Analyse it and respond with:
+1. What the issue is, in one line.
+2. The operational impact (which berth/vessel/yard work it threatens).
+3. A recommended course of action, concrete and ranked.
+Use tools to check the machine's sensor history and current fleet state before recommending. Be brief — this is an ops bulletin, not an essay.`;
+
+export async function handleEvent({ triggerType, summary, detail = null }) {
+  const episode = startEpisode({ triggerType, summary, detail });
+  addStep(episode, STEP.ANALYSIS, "Autonomous ingest — no operator prompted this; assessing severity and impact");
+
+  const severity = detail?.severity || "warning";
+  const equipmentId = detail?.equipmentId || null;
+
+  try {
+    if (aiAvailable !== false) {
+      const session = { history: [] }; // one-shot context; not tied to a browser
+      const prompt = `${AUTONOMOUS_PROMPT}\n\nEVENT: ${summary}\nDETAIL: ${JSON.stringify(detail)}`;
+      const answer = provider.kind === "claude"
+        ? await askClaude(prompt, session, episode)
+        : await askOpenAICompatible(prompt, session, episode);
+      addStep(episode, STEP.PLAN, answer.text.slice(0, 400));
+      if (severity === "critical") {
+        escalate(episode, { reason: `${summary} — agent recommendation issued`, severity });
+      }
+      if (episode.status !== "awaiting_approval") {
+        endEpisode(episode, "completed", "Recommendation posted to operators");
+      }
+      return { ...answer, episodeId: episode.id };
+    }
+  } catch (err) {
+    addStep(episode, STEP.FALLBACK, `Model unavailable during autonomous analysis (${err.status || "error"}) — using rule-based assessment`);
+  }
+
+  // Rule-based autonomous assessment — keeps this path working with no API key.
+  const assessment = assessEventWithRules({ severity, equipmentId, summary, episode });
+  addStep(episode, STEP.PLAN, assessment.text);
+  if (severity === "critical") {
+    escalate(episode, { reason: `${summary} — automatic escalation on critical severity`, severity });
+  }
+  if (episode.status !== "awaiting_approval") {
+    endEpisode(episode, "completed", "Recommendation posted to operators");
+  }
+  return { ...assessment, episodeId: episode.id };
+}
+
+function assessEventWithRules({ severity, equipmentId, summary, episode }) {
+  const toolsUsed = [];
+  const run = (name, input) => {
+    toolsUsed.push(name);
+    return runTool(name, input, episode);
+  };
+
+  const reading = equipmentId ? run("get_sensor_readings", { equipment_id: equipmentId }) : null;
+  const fleet = run("get_equipment_status", { only_unhealthy: true });
+
+  if (reading && reading.error) {
+    addStep(episode, STEP.UNCERTAINTY, `Could not read sensors for ${equipmentId}: ${reading.error}`);
+  }
+
+  const spares = (run("get_equipment_status", {}) || [])
+    .filter((e) => e.health === "good" && equipmentId && e.type === (reading?.type || ""))
+    .map((e) => e.id)
+    .slice(0, 2);
+
+  const lines = [];
+  lines.push(`${severity === "critical" ? "CRITICAL" : "Warning"}: ${summary}`);
+  if (reading && !reading.error) {
+    const worst = Object.values(reading.sensors).find((s) => s.current >= s.crit)
+      || Object.values(reading.sensors).find((s) => s.current >= s.warn);
+    if (worst) {
+      lines.push(`${worst.label} at ${worst.current} ${worst.unit} (warn ${worst.warn}, critical ${worst.crit}).`);
+    }
+    lines.push(`Operator on duty: ${reading.operator.name} (${reading.operator.channel}).`);
+  }
+  lines.push(
+    severity === "critical"
+      ? `Recommended: stop assigning new moves to ${equipmentId || "the affected unit"}, raise a maintenance job, and redistribute work${spares.length ? ` to ${spares.join(" / ")}` : ""}.`
+      : `Recommended: keep ${equipmentId || "the unit"} in service but inspect at the next shift change; re-check the trend within the hour.`
+  );
+  if (fleet.length > 1) {
+    lines.push(`Note: ${fleet.length} machines are currently degraded — check fleet capacity before reassigning work.`);
+  }
+
+  return {
+    text: lines.join("\n"),
+    view: "equipment",
+    toolsUsed,
+    mode: aiAvailable === false ? "rules" : "ai",
+    provider: getProviderLabel(),
+  };
 }

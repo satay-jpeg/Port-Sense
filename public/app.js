@@ -285,6 +285,103 @@ function renderAlerts() {
   if (!state.notifications.length) notif.append(el("li", { class: "empty", text: "No notifications dispatched yet." }));
 }
 
+/* ---------------- approvals & execution trace ---------------- */
+
+const TRIGGER_LABEL = {
+  user_request: "operator request",
+  operational_alert: "operational alert",
+  state_change: "state change",
+  process_metric: "process metric",
+  event_log: "event log",
+};
+
+const STEP_LABEL = {
+  input: "input", analysis: "analysis", plan: "plan",
+  tool_call: "tool call", tool_result: "result", tool_error: "tool error",
+  uncertainty: "uncertainty", clarification: "clarification",
+  approval_required: "approval req", approval_granted: "approved", approval_denied: "rejected",
+  action: "action", escalation: "escalation", fallback: "fallback",
+  outcome: "outcome", error: "error",
+};
+
+const openEpisodes = new Set(); // ids the user expanded — preserved across re-renders
+
+function hhmmss(iso) {
+  return new Date(iso).toLocaleTimeString("en-SG", { hour12: false });
+}
+
+async function decideApproval(id, decision) {
+  await fetch(`/api/approvals/${id}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision, by: "operator" }),
+  });
+  await refreshState();
+  switchView("trace");
+}
+
+function renderApprovals() {
+  const list = $("#approval-list");
+  list.replaceChildren();
+  const pending = state.approvals || [];
+  const badge = $("#approval-badge");
+  badge.hidden = pending.length === 0;
+  badge.textContent = pending.length;
+  if (state.supervisor) $("#supervisor-name").textContent = `${state.supervisor.name} (${state.supervisor.channel})`;
+
+  if (!pending.length) {
+    list.append(el("p", { class: "empty", text: "No actions awaiting approval. Read-only queries run without a gate; anything that changes terminal state appears here first." }));
+    return;
+  }
+  for (const a of pending) {
+    list.append(el("div", { class: `approval-card ${a.risk}` }, [
+      el("div", { class: "approval-main" }, [
+        el("b", { text: `${a.id} · ${a.description}` }),
+        el("span", { class: "why", text: a.why }),
+      ]),
+      el("div", { class: "approval-meta" }, [
+        el("span", { class: `risk-tag ${a.risk}`, text: `${a.risk} risk` }),
+        el("button", { class: "btn approve", text: "Approve", onclick: () => decideApproval(a.id, "approve") }),
+        el("button", { class: "btn reject", text: "Reject", onclick: () => decideApproval(a.id, "reject") }),
+      ]),
+    ]));
+  }
+}
+
+function renderTrace() {
+  const list = $("#trace-list");
+  list.replaceChildren();
+  const episodes = state.trace || [];
+  if (!episodes.length) {
+    list.append(el("p", { class: "empty", text: "No episodes yet. Ask the agent a question, or wait for an equipment alert to trigger autonomous analysis." }));
+    return;
+  }
+  for (const ep of episodes) {
+    const card = el("div", { class: `trace-card ${openEpisodes.has(ep.id) ? "open" : ""}` });
+    const head = el("div", { class: "trace-head" }, [
+      el("span", { class: "tid", text: ep.id }),
+      el("span", { class: `trigger-tag ${ep.triggerType}`, text: TRIGGER_LABEL[ep.triggerType] || ep.triggerType }),
+      el("span", { class: "tsummary", text: ep.summary.slice(0, 120) }),
+      el("span", { class: `trace-status ${ep.status}`, text: ep.status.replace(/_/g, " ") }),
+      el("span", { class: "tid", text: `${ep.steps.length} steps` }),
+    ]);
+    head.addEventListener("click", () => {
+      if (openEpisodes.has(ep.id)) openEpisodes.delete(ep.id);
+      else openEpisodes.add(ep.id);
+      renderTrace();
+    });
+    const steps = el("div", { class: "trace-steps" },
+      ep.steps.map((s) => el("div", { class: `step ${s.type}` }, [
+        el("span", { class: "st-time", text: hhmmss(s.t) }),
+        el("span", { class: "st-kind", text: STEP_LABEL[s.type] || s.type }),
+        el("span", { class: "st-text", text: s.summary }),
+      ]))
+    );
+    card.append(head, steps);
+    list.append(card);
+  }
+}
+
 /* ---------------- toasts ---------------- */
 
 function toast(alert) {
@@ -408,6 +505,25 @@ function connectStream() {
     }
     if ($("#view-equipment").classList.contains("active")) renderEquipment();
   });
+  // Trace episodes stream in live — including ones the agent starts on its own
+  // in response to equipment alerts, with no operator involvement.
+  es.addEventListener("trace", (ev) => {
+    if (!state) return;
+    const ep = JSON.parse(ev.data);
+    const list = state.trace || (state.trace = []);
+    const idx = list.findIndex((e) => e.id === ep.id);
+    if (idx >= 0) list[idx] = ep;
+    else list.unshift(ep);
+    if (ep.status === "awaiting_approval") {
+      // A proposal just landed — refresh so the approval card appears.
+      fetch("/api/approvals").then((r) => r.json()).then((d) => {
+        state.approvals = d.approvals;
+        state.supervisor = d.supervisor;
+        renderApprovals();
+      });
+    }
+    renderTrace();
+  });
   es.addEventListener("alert", (ev) => {
     const alert = JSON.parse(ev.data);
     if (state) {
@@ -437,6 +553,8 @@ async function refreshState() {
   renderYard();
   renderEquipment();
   renderAlerts();
+  renderApprovals();
+  renderTrace();
   renderInterval(state.intervalSeconds);
   renderMode(state.mode, state.provider);
 }

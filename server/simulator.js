@@ -5,6 +5,19 @@
 
 import { equipment, SENSOR_SPEC, alerts, notificationLog } from "./state.js";
 
+// Set by index.js after boot to avoid a circular import with agent.js.
+// Receives operational events so the agent can analyse them unprompted.
+let eventSink = null;
+export function setEventSink(fn) {
+  eventSink = fn;
+}
+
+// Autonomous analysis costs a model call, and free tiers are rate-limited
+// (~15 req/min on Gemini). Analyse a given machine+sensor at most once every
+// few minutes no matter how long it stays in alarm.
+const AUTONOMOUS_COOLDOWN_MS = Number(process.env.AUTONOMOUS_COOLDOWN_MS || 5 * 60 * 1000);
+const autonomousCooldown = new Map();
+
 const HISTORY_LEN = 60;
 let intervalMs = Number(process.env.SENSOR_INTERVAL_MS || 5000);
 let timer = null;
@@ -29,6 +42,11 @@ export function addClient(res) {
 function broadcast(event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const res of sseClients) res.write(payload);
+}
+
+// Lets other modules (e.g. the trace layer) push onto the same SSE stream.
+export function broadcastTo(event, data) {
+  broadcast(event, data);
 }
 
 function raiseAlert(eq, sensorKey, value, severity) {
@@ -68,6 +86,32 @@ function raiseAlert(eq, sensorKey, value, severity) {
     text: `[${severity.toUpperCase()}] ${alert.message}. Please inspect ${eq.id}.`,
   });
   broadcast("alert", alert);
+
+  // Hand the alert to the agent as an autonomous input. Only critical alerts
+  // trigger analysis — warnings would flood the trace and burn free-tier quota.
+  // A per-machine cooldown stops a machine that sits above its critical
+  // threshold from re-triggering analysis on every sampling tick.
+  const cooldownKey = `${eq.id}:${sensorKey}`;
+  const lastRun = autonomousCooldown.get(cooldownKey) || 0;
+  const cooledDown = Date.now() - lastRun > AUTONOMOUS_COOLDOWN_MS;
+  if (eventSink && severity === "critical" && cooledDown) {
+    autonomousCooldown.set(cooldownKey, Date.now());
+    eventSink({
+      triggerType: "operational_alert",
+      summary: alert.message,
+      detail: {
+        alertId: alert.id,
+        equipmentId: eq.id,
+        equipmentType: eq.type,
+        sensor: sensorKey,
+        value: alert.value,
+        threshold: alert.threshold,
+        unit: alert.unit,
+        severity,
+        operator: eq.operator,
+      },
+    });
+  }
   return alert;
 }
 

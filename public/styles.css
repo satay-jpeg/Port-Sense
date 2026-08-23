@@ -246,6 +246,75 @@ td.strong { color: var(--text-primary); font-weight: 600; }
 }
 .chat-input input:focus { outline: none; border-color: var(--series-1); }
 
+/* ---------- approvals ---------- */
+.badge.amber { background: var(--status-warning); color: #1a1a19; }
+
+.approval-list { display: grid; gap: 10px; }
+.approval-card {
+  background: var(--surface-2); border: 1px solid rgba(250, 178, 25, 0.45);
+  border-radius: 8px; padding: 12px 14px;
+  display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
+}
+.approval-card.high { border-color: rgba(208, 59, 59, 0.55); }
+.approval-main { display: flex; flex-direction: column; gap: 3px; max-width: 640px; }
+.approval-main b { font-size: 13px; }
+.approval-main .why { font-size: 12px; color: var(--text-muted); }
+.approval-meta { display: flex; gap: 8px; align-items: center; }
+.risk-tag {
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; color: var(--text-secondary);
+}
+.risk-tag.medium { color: var(--status-warning); border-color: rgba(250,178,25,0.4); }
+.risk-tag.high { color: var(--status-critical); border-color: rgba(208,59,59,0.5); }
+.btn.approve { background: var(--status-good); border-color: var(--status-good); color: #fff; }
+.btn.reject { background: transparent; border-color: rgba(208,59,59,0.5); color: var(--status-critical); }
+
+/* ---------- execution trace ---------- */
+.trace-list { display: grid; gap: 12px; }
+.trace-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.trace-head {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  cursor: pointer; user-select: none; flex-wrap: wrap;
+}
+.trace-head:hover { background: rgba(255,255,255,0.03); }
+.trace-head .tid { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.trace-head .tsummary { font-size: 13px; flex: 1; min-width: 200px; }
+.trigger-tag {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  border-radius: 4px; padding: 2px 7px; border: 1px solid var(--border); color: var(--text-secondary);
+}
+.trigger-tag.user_request { color: var(--series-1); border-color: rgba(57,135,229,0.4); }
+.trigger-tag.operational_alert { color: var(--status-critical); border-color: rgba(208,59,59,0.45); }
+.trigger-tag.state_change, .trigger-tag.process_metric { color: var(--series-2); border-color: rgba(25,158,112,0.4); }
+.trace-status { font-size: 11px; color: var(--text-muted); }
+.trace-status.awaiting_approval { color: var(--status-warning); }
+.trace-status.failed { color: var(--status-critical); }
+.trace-status.completed { color: var(--status-good); }
+
+.trace-steps { display: none; padding: 4px 14px 14px; border-top: 1px solid var(--grid); }
+.trace-card.open .trace-steps { display: block; }
+.step {
+  display: grid; grid-template-columns: 62px 132px 1fr; gap: 10px;
+  padding: 5px 0; font-size: 12px; align-items: start;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.step:last-child { border-bottom: none; }
+.step .st-time { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+.step .st-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); }
+.step .st-text { color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
+.step.tool_call .st-kind, .step.tool_call .st-text { color: var(--series-1); }
+.step.tool_error .st-kind, .step.tool_error .st-text,
+.step.error .st-kind, .step.error .st-text { color: var(--status-critical); }
+.step.approval_required .st-kind, .step.approval_required .st-text { color: var(--status-warning); }
+.step.approval_granted .st-kind, .step.approval_granted .st-text,
+.step.action .st-kind, .step.action .st-text { color: var(--status-good); }
+.step.approval_denied .st-kind, .step.approval_denied .st-text { color: var(--status-serious); }
+.step.escalation .st-kind, .step.escalation .st-text { color: var(--series-5); }
+.step.uncertainty .st-kind, .step.uncertainty .st-text,
+.step.clarification .st-kind, .step.clarification .st-text,
+.step.fallback .st-kind, .step.fallback .st-text { color: var(--status-serious); }
+.step.plan .st-text, .step.analysis .st-text { color: var(--text-primary); }
+
 /* ---------- toasts & tooltip ---------- */
 .toast-stack { position: fixed; right: 380px; bottom: 20px; display: grid; gap: 8px; z-index: 50; }
 .toast {

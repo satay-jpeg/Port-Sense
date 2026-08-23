@@ -28,6 +28,7 @@
     <button class="tab" data-view="yard" role="tab">📦 Yard Reshuffling</button>
     <button class="tab" data-view="equipment" role="tab">🛠 Equipment Health</button>
     <button class="tab" data-view="alerts" role="tab">🔔 Alerts <span class="badge" id="alert-badge" hidden>0</span></button>
+    <button class="tab" data-view="trace" role="tab">🧠 Agent Trace <span class="badge amber" id="approval-badge" hidden>0</span></button>
   </nav>
 
   <div class="layout">
@@ -97,6 +98,23 @@
         <div class="panel">
           <div class="panel-head"><h2>Operator notifications</h2><p class="panel-sub">Simulated pager / SMS dispatch log</p></div>
           <ul id="notif-list" class="notif-list"></ul>
+        </div>
+      </section>
+      <!-- Agent execution trace -->
+      <section class="view" id="view-trace" role="tabpanel">
+        <div class="panel" id="approvals-panel">
+          <div class="panel-head">
+            <h2>Pending approvals</h2>
+            <p class="panel-sub">The agent proposes state-changing actions; nothing is applied until an operator approves. Escalations go to <span id="supervisor-name">the duty manager</span>.</p>
+          </div>
+          <div id="approval-list" class="approval-list"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Execution trace</h2>
+            <p class="panel-sub">Every input the agent processed — operator questions and autonomous events alike — with the decisions, tool calls, results, errors and approvals behind each one.</p>
+          </div>
+          <div id="trace-list" class="trace-list"></div>
         </div>
       </section>
     </main>
