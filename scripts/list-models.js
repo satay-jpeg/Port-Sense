@@ -12,6 +12,20 @@ const PROVIDERS = {
 };
 
 const wanted = (process.env.AGENT_PROVIDER || "").toLowerCase().trim();
+
+// Anthropic has a fixed model set and no discovery endpoint in this flow, so
+// there is nothing to list — say so instead of failing with "no provider key".
+if (wanted === "claude" || wanted === "anthropic") {
+  console.log(
+    "\nAGENT_PROVIDER is set to Anthropic, which uses a fixed model " +
+    "(claude-opus-4-8) — there's no model list to discover.\n\n" +
+    "This script is for the OpenAI-compatible providers (Gemini, Groq, " +
+    "Cerebras, OpenRouter).\nTo check those, temporarily comment out " +
+    "AGENT_PROVIDER in .env and re-run.\n"
+  );
+  process.exit(0);
+}
+
 const entry = Object.entries(PROVIDERS).find(
   ([name, [keyEnv]]) => (wanted ? name === wanted : process.env[keyEnv])
 );
