@@ -2,6 +2,23 @@
 
 **An agentic operations console for a PSA container terminal.**
 
+### ▶ Live demo — [port-sense.onrender.com](https://port-sense.onrender.com/)
+
+Sign in with **`operator`** / **`portsense`** — both fields are pre-filled, so it
+is one click. A **`supervisor`** account (same password) also exists; it is
+needed for the high-risk approval described below.
+
+> **First load may take up to a minute.** The instance runs on Render's free
+> tier and sleeps after inactivity — the page will appear to hang while the
+> container wakes. Subsequent navigation is immediate.
+>
+> Give it about **90 seconds** after signing in before judging the agent: the
+> equipment simulation needs that long for a machine to drift into a critical
+> alarm, which is what triggers the agent to act on its own.
+
+Nothing needs installing, and no API key of your own is required — the deployed
+instance carries its own.
+
 PortSense watches a terminal, forms a view about what is happening, and proposes
 what to do about it. It covers three problem areas — unpredictable vessel
 arrivals, yard reshuffling, and equipment predictive maintenance — behind a
@@ -175,25 +192,49 @@ caps the worst case at a rate limit rather than a bill.
 
 ## Seeing it run
 
+**Hosted:** [port-sense.onrender.com](https://port-sense.onrender.com/) —
+`operator` / `portsense`, pre-filled.
+
+**Locally**, if you would rather read the code while it runs:
+
 ```bash
 npm install && npm start          # http://localhost:3000
 ```
 
-Sign in with `operator` / `portsense` (pre-filled). A `supervisor` account with
-the same password exists — needed for high-risk approvals.
+This works with **no API key at all** — the agent falls back to its deterministic
+router and every panel still functions. Deployment notes are in
+[DEPLOY.md](DEPLOY.md).
 
-Deployment notes are in [DEPLOY.md](DEPLOY.md).
+### A five-minute tour
 
-Worth trying, in order:
+Each step demonstrates a different requirement, in ascending order of interest:
 
-1. **"Which vessels are predicted to arrive late?"** — tool selection routes the view
-2. **"The crane is playing up"** — ambiguity produces a question, not a guess
-3. **"Sample the sensors every 30 seconds"** — watch the interval *not* change until approved
-4. **Agent Trace** — expand the `operational alert` episode nobody asked for
-5. **Sign in as `supervisor`** — approve a high-risk action an operator cannot
+1. **"Which vessels are predicted to arrive late?"**
+   The Arrivals panel opens by itself — you did not click it. Tool selection is
+   what routes the interface.
 
-The scripted faults mean an alert always appears: QC-03 runs hot within a minute,
-RTG-02's gearbox vibration climbs to critical shortly after.
+2. **"The crane is playing up."**
+   Deliberately ambiguous: there are seven machines. The agent asks *which one*
+   rather than picking. Uncertainty is surfaced, not smoothed over.
+
+3. **"Sample the sensors every 30 seconds."**
+   Watch the `sensors` chip in the header. **It does not change.** The agent
+   cannot alter terminal state; it has filed a proposal. Approve it in **Agent
+   Trace** and the chip updates only then.
+
+4. **Agent Trace → expand an `operational alert` episode.**
+   Nobody asked for this one. A sensor crossed its threshold, the agent
+   investigated across several tools, formed a recommendation and escalated to
+   the duty manager — while the console sat idle.
+
+5. **Ask for a fault injection** (*"simulate a fault on AGV-02"*), then try to
+   approve it as `operator`. You are **refused** — it is high risk and needs a
+   supervisor. Sign out, sign in as `supervisor`, approve it. The refusal is
+   enforced server-side, not by hiding the button.
+
+Two scripted faults guarantee there is always something to see: QC-03 runs hot
+within a minute of startup, and RTG-02's gearbox vibration climbs to critical
+shortly after.
 
 ---
 

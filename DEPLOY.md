@@ -1,5 +1,9 @@
 # Deploying PortSense to Render (free tier)
 
+> **Already deployed:** [port-sense.onrender.com](https://port-sense.onrender.com/)
+> — sign in with `operator` / `portsense`. This document covers how that was set
+> up and how to redeploy it.
+
 Goal: a public URL judges can open where **the AI agent already works** — they
 need no API key, no signup, and no local setup.
 
