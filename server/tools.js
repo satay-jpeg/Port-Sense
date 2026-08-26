@@ -134,6 +134,20 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "request_clarification",
+    description:
+      "Ask the operator ONE specific question when their request is ambiguous or missing information you need — for example 'the crane is playing up' when there are seven machines, or a container action with no container ID. Call this instead of guessing. State what is ambiguous and list the candidate options.",
+    input_schema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The single question to put to the operator" },
+        ambiguity: { type: "string", description: "What specifically is under-specified" },
+        options: { type: "array", items: { type: "string" }, description: "Candidate values the operator might mean" },
+      },
+      required: ["question", "ambiguity"],
+    },
+  },
+  {
     name: "simulate_fault",
     description:
       "Inject a demo fault into a piece of equipment so its sensor drifts into alarm (for demonstrations only). Call this only when the user explicitly asks to simulate or demo a fault.",
@@ -217,6 +231,16 @@ export function executeTool(name, input = {}) {
       a.acknowledged = true;
       return { ok: true, alert: a };
     }
+    case "request_clarification":
+      // Nothing to compute — the value is that the ambiguity is now explicit
+      // and lands in the execution trace rather than being silently guessed.
+      return {
+        acknowledged: true,
+        question: input.question,
+        ambiguity: input.ambiguity,
+        options: input.options || [],
+        note: "Put this question to the operator verbatim and stop; do not guess an answer.",
+      };
     case "simulate_fault": {
       const ok = injectFault(String(input.equipment_id).toUpperCase(), input.sensor || "vibration");
       return ok

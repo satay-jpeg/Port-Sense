@@ -9,7 +9,8 @@ import {
 import { boot, addClient, getIntervalMs, setIntervalMs, setEventSink, broadcastTo } from "./simulator.js";
 import { ask, handleEvent, getMode, getProviderLabel, resetConversation, sessionCount, rateStatus } from "./agent.js";
 import { listEpisodes, getEpisode, setBroadcaster } from "./trace.js";
-import { listApprovals, resolveApproval, SUPERVISOR } from "./approvals.js";
+import { listApprovals, resolveApproval, getApproval, canApprove, SUPERVISOR } from "./approvals.js";
+import { setEventSink as setMonitorSink, startMonitors, forceCheck, nudgeEta } from "./monitors.js";
 import {
   verifyCredentials, createSession, cookieHeader, currentUser, requireAuth, DEMO_CREDENTIALS,
 } from "./auth.js";
@@ -169,6 +170,23 @@ app.get("/healthz", (req, res) => {
   });
 });
 
+// ---- demo triggers ----
+// The autonomous inputs are threshold-driven and rate-limited, which is right
+// for running but awkward for a presentation. This fires one on cue.
+app.post("/api/demo/trigger", (req, res) => {
+  const kind = String(req.body?.kind || "").toLowerCase();
+  if (kind === "state_change") {
+    const v = nudgeEta(req.body?.vessel || "Kota Harmoni", Number(req.body?.hours) || 3);
+    if (!v) return res.status(404).json({ error: "vessel not found" });
+    forceCheck("state_change");
+    return res.json({ ok: true, kind, vessel: v.name, delayHours: v.delayHours });
+  }
+  if (["process_metric", "event_log"].includes(kind)) {
+    return res.json({ ok: forceCheck(kind), kind });
+  }
+  res.status(400).json({ error: "kind must be state_change, process_metric or event_log" });
+});
+
 // ---- execution trace ----
 app.get("/api/trace", (req, res) => {
   res.json({ episodes: listEpisodes(Number(req.query.limit) || 25) });
@@ -193,8 +211,17 @@ app.post("/api/approvals/:id", (req, res) => {
   if (!["approve", "reject"].includes(decision)) {
     return res.status(400).json({ error: "decision must be 'approve' or 'reject'" });
   }
+  const record = getApproval(req.params.id.toUpperCase());
+  if (!record) return res.status(404).json({ error: "approval not found" });
+
+  // Authority check happens server-side: hiding the button would not be a control.
+  if (decision === "approve") {
+    const verdict = canApprove(record, req.user);
+    if (!verdict.ok) return res.status(403).json({ error: verdict.reason });
+  }
+
   const out = resolveApproval(req.params.id.toUpperCase(), decision, {
-    by: String(req.body?.by || "operator").slice(0, 60),
+    by: `${req.user.name} (${req.user.role})`,
     reason: req.body?.reason ? String(req.body.reason).slice(0, 200) : null,
     episodeLookup: getEpisode,
   });
@@ -207,11 +234,18 @@ const PORT = Number(process.env.PORT || 3000);
 // Stream trace updates to the dashboard over the existing SSE channel, and let
 // the simulator hand operational events to the agent for autonomous analysis.
 setBroadcaster(broadcastTo);
-setEventSink((event) => {
+
+// All autonomous inputs — equipment alarms from the simulator, and vessel
+// state changes / yard KPI breaches / gate log anomalies from the monitors —
+// funnel into the same agent entry point.
+const ingest = (event) => {
   handleEvent(event).catch((err) => console.error("[portsense] autonomous event failed:", err));
-});
+};
+setEventSink(ingest);
+setMonitorSink(ingest);
 
 boot();
+startMonitors();
 app.listen(PORT, () => {
   console.log(`PortSense running on http://localhost:${PORT}`);
   console.log(`Agent provider: ${getProviderLabel()}`);

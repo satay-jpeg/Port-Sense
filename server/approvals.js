@@ -33,6 +33,17 @@ export function requiresApproval(toolName) {
   return Object.prototype.hasOwnProperty.call(WRITE_TOOLS, toolName);
 }
 
+// High-risk actions need a supervisor, not just any signed-in operator. This is
+// the second rung of the human-in-the-loop ladder: propose → approve → and for
+// the riskiest actions, approve *by someone with the authority*.
+export function canApprove(record, user) {
+  if (!user) return { ok: false, reason: "not signed in" };
+  if (record.risk === "high" && user.role !== "supervisor") {
+    return { ok: false, reason: `${record.description} is high risk and needs a supervisor; you are signed in as ${user.role}` };
+  }
+  return { ok: true };
+}
+
 // The supervisor an escalation goes to when severity warrants a human decision.
 export const SUPERVISOR = { name: "Duty Terminal Manager", channel: "ops-bridge x4400" };
 

@@ -353,6 +353,16 @@ function viewForTools(toolsUsed) {
 function runTool(name, args = {}, episode = null) {
   addStep(episode, STEP.TOOL_CALL, `${name}(${JSON.stringify(args).slice(0, 140)})`, { tool: name, args });
 
+  // Clarification is a first-class outcome, not a data lookup: record the
+  // ambiguity and the question so the trace evidences that the agent declined
+  // to guess. Without this, uncertainty handling is invisible on the AI path.
+  if (name === "request_clarification") {
+    addStep(episode, STEP.UNCERTAINTY, args.ambiguity || "Request is ambiguous",
+      { options: args.options || [] });
+    addStep(episode, STEP.CLARIFICATION, args.question || "Asked the operator to clarify");
+    return executeTool(name, args);
+  }
+
   if (requiresApproval(name)) {
     const proposal = proposeAction({ tool: name, args, episode });
     return {
@@ -729,18 +739,24 @@ export async function ask(question, sessionId = "default") {
 // process metrics — enter here. The agent analyses them unprompted, decides a
 // course of action, and escalates when severity warrants a human.
 
-const AUTONOMOUS_PROMPT = `An operational event has just been raised by the terminal's monitoring system. Analyse it and respond with:
+const AUTONOMOUS_PROMPT = `An operational event has just been raised by the terminal's monitoring systems. Analyse it and respond with:
 1. What the issue is, in one line.
-2. The operational impact (which berth/vessel/yard work it threatens).
+2. The operational impact — which berth, vessel, yard block or gate lane it threatens.
 3. A recommended course of action, concrete and ranked.
-Use tools to check the machine's sensor history and current fleet state before recommending. Be brief — this is an ops bulletin, not an essay.`;
+Call the tools you need to establish the current picture before recommending; do not speculate about state you have not checked. Be brief — this is an ops bulletin, not an essay.`;
+
+const INGEST_NOTE = {
+  operational_alert: "Equipment alarm ingested — no operator prompted this; assessing severity and impact",
+  state_change: "Vessel state change ingested — assessing berth-window impact",
+  process_metric: "Yard KPI breach ingested — assessing whether intervention is warranted",
+  event_log: "Gate log anomaly ingested — assessing throughput impact",
+};
 
 export async function handleEvent({ triggerType, summary, detail = null }) {
   const episode = startEpisode({ triggerType, summary, detail });
-  addStep(episode, STEP.ANALYSIS, "Autonomous ingest — no operator prompted this; assessing severity and impact");
+  addStep(episode, STEP.ANALYSIS, INGEST_NOTE[triggerType] || "Autonomous ingest — assessing severity and impact");
 
   const severity = detail?.severity || "warning";
-  const equipmentId = detail?.equipmentId || null;
 
   try {
     // Background analysis yields to operator questions: it may only use part of
@@ -774,7 +790,7 @@ export async function handleEvent({ triggerType, summary, detail = null }) {
   }
 
   // Rule-based autonomous assessment — keeps this path working with no API key.
-  const assessment = assessEventWithRules({ severity, equipmentId, summary, episode });
+  const assessment = assessEventWithRules({ triggerType, severity, detail, summary, episode });
   addStep(episode, STEP.PLAN, assessment.text);
   if (severity === "critical") {
     escalate(episode, { reason: `${summary} — automatic escalation on critical severity`, severity });
@@ -785,47 +801,87 @@ export async function handleEvent({ triggerType, summary, detail = null }) {
   return { ...assessment, episodeId: episode.id };
 }
 
-function assessEventWithRules({ severity, equipmentId, summary, episode }) {
+// Deterministic assessment per input class. Mirrors what the model is asked to
+// produce (issue → impact → ranked action) so the trace reads the same either
+// way, and so the no-key path is a real fallback rather than a stub.
+function assessEventWithRules({ triggerType, severity, detail = {}, summary, episode }) {
   const toolsUsed = [];
   const run = (name, input) => {
     toolsUsed.push(name);
     return runTool(name, input, episode);
   };
+  const lines = [`${severity === "critical" ? "CRITICAL" : "Warning"}: ${summary}`];
+  let view = "equipment";
 
-  const reading = equipmentId ? run("get_sensor_readings", { equipment_id: equipmentId }) : null;
-  const fleet = run("get_equipment_status", { only_unhealthy: true });
-
-  if (reading && reading.error) {
-    addStep(episode, STEP.UNCERTAINTY, `Could not read sensors for ${equipmentId}: ${reading.error}`);
-  }
-
-  const spares = (run("get_equipment_status", {}) || [])
-    .filter((e) => e.health === "good" && equipmentId && e.type === (reading?.type || ""))
-    .map((e) => e.id)
-    .slice(0, 2);
-
-  const lines = [];
-  lines.push(`${severity === "critical" ? "CRITICAL" : "Warning"}: ${summary}`);
-  if (reading && !reading.error) {
-    const worst = Object.values(reading.sensors).find((s) => s.current >= s.crit)
-      || Object.values(reading.sensors).find((s) => s.current >= s.warn);
-    if (worst) {
-      lines.push(`${worst.label} at ${worst.current} ${worst.unit} (warn ${worst.warn}, critical ${worst.crit}).`);
+  if (triggerType === "state_change") {
+    view = "arrivals";
+    const v = run("predict_vessel_arrival", { vessel: detail.vessel || "" });
+    if (v.error) {
+      addStep(episode, STEP.UNCERTAINTY, `Could not resolve vessel: ${v.error}`);
+    } else {
+      lines.push(`Predicted ETA now ${new Date(v.predictedEta).toUTCString().slice(5, 22)} (confidence ${Math.round(v.confidence * 100)}%).`);
+      if (v.confidence < 0.8) {
+        addStep(episode, STEP.UNCERTAINTY, `Prediction confidence ${Math.round(v.confidence * 100)}% — treat the revised ETA as provisional`);
+        lines.push("Confidence is below 80% — treat this ETA as provisional and re-check before committing the berth.");
+      }
     }
-    lines.push(`Operator on duty: ${reading.operator.name} (${reading.operator.channel}).`);
-  }
-  lines.push(
-    severity === "critical"
-      ? `Recommended: stop assigning new moves to ${equipmentId || "the affected unit"}, raise a maintenance job, and redistribute work${spares.length ? ` to ${spares.join(" / ")}` : ""}.`
-      : `Recommended: keep ${equipmentId || "the unit"} in service but inspect at the next shift change; re-check the trend within the hour.`
-  );
-  if (fleet.length > 1) {
-    lines.push(`Note: ${fleet.length} machines are currently degraded — check fleet capacity before reassigning work.`);
+    lines.push(
+      Math.abs(detail.driftHours || 0) >= 4
+        ? `Recommended: release berth ${detail.berth} to the next arrival and re-plan this vessel's window; notify the berth planner.`
+        : `Recommended: hold berth ${detail.berth} but rebuild the labour roster around the revised window.`
+    );
+
+  } else if (triggerType === "process_metric") {
+    view = "yard";
+    const y = run("get_yard_status", {});
+    const recs = run("get_reshuffle_recommendations", { window_hours: 12 });
+    lines.push(`Yard at ${detail.utilisationPct}% across ${y.blocks?.length ?? "?"} blocks; ${detail.projectedRehandles} rehandles projected.`);
+    lines.push(
+      recs.recommendations?.length
+        ? `Recommended: pre-shuffle the top ${Math.min(3, recs.recommendations.length)} buried boxes during the next crane idle window — that removes ${detail.avoidableRehandles} of the projected rehandles.`
+        : "Recommended: no pre-shuffle candidates; hold and re-evaluate after the next discharge."
+    );
+
+  } else if (triggerType === "event_log") {
+    view = "equipment";
+    lines.push(`${detail.affectedTransactions} of ${detail.batchSize} sampled transactions exceeded the normal band (${detail.normalRangeMin?.join("–")} min).`);
+    const fleet = run("get_equipment_status", { only_unhealthy: true });
+    if (fleet.length) {
+      lines.push(`${fleet.length} machine(s) currently degraded — a slow gate often reflects yard-side congestion rather than the lane itself.`);
+      lines.push(`Recommended: check ${fleet.map((e) => e.id).join(", ")} before assuming a gate fault; if the fleet is healthy, open a second lane.`);
+    } else {
+      addStep(episode, STEP.UNCERTAINTY, "No degraded equipment found — root cause not determinable from available signals");
+      lines.push(`Recommended: fleet is healthy, so the constraint is likely the lane itself — open a second ${detail.lane?.startsWith("GATE-IN") ? "inbound" : "outbound"} lane and re-measure.`);
+    }
+
+  } else {
+    // operational_alert — equipment alarm
+    const equipmentId = detail.equipmentId || null;
+    const reading = equipmentId ? run("get_sensor_readings", { equipment_id: equipmentId }) : null;
+    const fleet = run("get_equipment_status", { only_unhealthy: true });
+    if (reading && reading.error) {
+      addStep(episode, STEP.UNCERTAINTY, `Could not read sensors for ${equipmentId}: ${reading.error}`);
+    }
+    const spares = (run("get_equipment_status", {}) || [])
+      .filter((e) => e.health === "good" && e.type === (reading?.type || ""))
+      .map((e) => e.id).slice(0, 2);
+    if (reading && !reading.error) {
+      const worst = Object.values(reading.sensors).find((s) => s.current >= s.crit)
+        || Object.values(reading.sensors).find((s) => s.current >= s.warn);
+      if (worst) lines.push(`${worst.label} at ${worst.current} ${worst.unit} (warn ${worst.warn}, critical ${worst.crit}).`);
+      lines.push(`Operator on duty: ${reading.operator.name} (${reading.operator.channel}).`);
+    }
+    lines.push(
+      severity === "critical"
+        ? `Recommended: stop assigning new moves to ${equipmentId || "the affected unit"}, raise a maintenance job, and redistribute work${spares.length ? ` to ${spares.join(" / ")}` : ""}.`
+        : `Recommended: keep ${equipmentId || "the unit"} in service but inspect at the next shift change; re-check the trend within the hour.`
+    );
+    if (fleet.length > 1) lines.push(`Note: ${fleet.length} machines are degraded — check fleet capacity before reassigning work.`);
   }
 
   return {
     text: lines.join("\n"),
-    view: "equipment",
+    view,
     toolsUsed,
     mode: aiAvailable === false ? "rules" : "ai",
     provider: getProviderLabel(),
